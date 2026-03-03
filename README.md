@@ -320,12 +320,12 @@ To process a BitLocker-protected VM:
 
 ## Domain Controllers
 
-**Do not include domain controllers in automated runs.**
+**Domain controllers in automated runs.**
 
-Domain controllers require manual handling because `Invoke-VMScript` cannot run
-elevated commands due to UAC. A separate step-by-step guide covering the full DC
+I ran into an issue with domain controllers because `Invoke-VMScript` could not run
+elevated commands due to UAC in my environment. A separate step-by-step guide covering the full DC
 procedure (including FSMO role management, replication verification, and PDC
-Emulator transfer) is provided in `DC_SecureBoot_Manual_Steps.md`.
+Emulator transfer) is provided in `DC_SecureBoot_Manual_Steps.md`. You are welcome to try running this on domain controllers in your environment but your mileage may vary.
 
 ---
 
