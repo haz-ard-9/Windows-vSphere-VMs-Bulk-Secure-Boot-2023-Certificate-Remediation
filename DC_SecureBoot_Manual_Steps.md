@@ -18,6 +18,14 @@ entirely before touching DC2 (the PDC Emulator holder).
 
 > Substitute your actual DC hostnames for `DC1` and `DC2` throughout this guide.
 
+**Prerequisites:**
+- ESXi host must be on **8.0.2 or later** — earlier versions will not regenerate NVRAM with 2023 certificates
+- VM hardware version must be **13 or later** — required for EFI/Secure Boot support
+- **VMware Tools must be installed and running** on the DC — required for `Invoke-VMScript` to verify NVRAM cert presence after power-on. Check status in vSphere Client or with PowerCLI:
+  ```powershell
+  (Get-VM "DC1").Guest.ExtensionData.ToolsStatus  # Expected: toolsOk
+  ```
+
 ---
 
 ## Pre-Work (Complete Before Any Maintenance Window)
