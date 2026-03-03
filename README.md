@@ -385,7 +385,3 @@ amount of disk I/O that occurs while it exists. If space is constrained, use
 array snapshot or backup taken immediately before running the script).
 
 ---
-
-## License
-
-MIT License. See `LICENSE` for details.
