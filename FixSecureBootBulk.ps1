@@ -423,10 +423,17 @@ function Restore-VMNvram {
 # =============================================================================
 
 # BitLocker / TPM safety check
+# $ErrorActionPreference = 'SilentlyContinue' suppresses CommandNotFoundException when
+# Get-BitLockerVolume is not available (BitLocker module not installed on the guest).
+# Without this, the error text is written into ScriptOutput ahead of the JSON and breaks
+# ConvertFrom-Json. $WarningPreference and $ProgressPreference suppress additional
+# non-JSON output from Get-Tpm on VMs without a vTPM.
 $tpmCheckScript = @'
-$tpm = Get-Tpm -ErrorAction SilentlyContinue
-$bl  = Get-BitLockerVolume -ErrorAction SilentlyContinue |
-       Where-Object { $_.ProtectionStatus -eq "On" }
+$ErrorActionPreference = 'SilentlyContinue'
+$WarningPreference     = 'SilentlyContinue'
+$ProgressPreference    = 'SilentlyContinue'
+$tpm = Get-Tpm
+$bl  = Get-BitLockerVolume | Where-Object { $_.ProtectionStatus -eq "On" }
 [PSCustomObject]@{
     TPMPresent      = ($null -ne $tpm -and $tpm.TpmPresent)
     BitLockerActive = ($null -ne $bl -and @($bl).Count -gt 0)
@@ -768,7 +775,7 @@ if ($Rollback) {
             # Step 1 - Power off
             Write-Host "  [1/4] Powering off..." -ForegroundColor Cyan
             if ($vm.PowerState -eq "PoweredOn") {
-                Stop-VM -VM $vm -Confirm:$false | Out-Null
+                Stop-VM -VM $vm -Confirm:$false -Force -ErrorAction Stop | Out-Null
                 Start-Sleep -Seconds 10
             }
             $row.PoweredOff = $true
@@ -911,7 +918,9 @@ foreach ($vm in $vms) {
             try {
                 $tpmOut  = Invoke-VMScript -VM $vm -ScriptText $tpmCheckScript `
                     -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
-                $tpmData = $tpmOut.ScriptOutput.Trim() | ConvertFrom-Json
+                $jsonLine = ($tpmOut.ScriptOutput -split "`r?`n" | Where-Object { $_.Trim() -match '^{' } | Select-Object -Last 1).Trim()
+                if (-not $jsonLine) { throw "No JSON output from BitLocker check script" }
+                $tpmData = $jsonLine | ConvertFrom-Json
 
                 if ($tpmData.BitLockerActive) {
                     Write-Warning "  BitLocker ACTIVE on $vmName - SKIPPING."
@@ -953,7 +962,7 @@ foreach ($vm in $vms) {
         # ------------------------------------------------------------------
         Write-Host "  [2/7] Powering off..." -ForegroundColor Cyan
         if ($vm.PowerState -eq "PoweredOn") {
-            Stop-VM -VM $vm -Confirm:$false | Out-Null
+            Stop-VM -VM $vm -Confirm:$false -Force -ErrorAction Stop | Out-Null
             Start-Sleep -Seconds 10
         }
 
