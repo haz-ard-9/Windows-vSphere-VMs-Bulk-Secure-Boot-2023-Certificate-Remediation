@@ -775,7 +775,7 @@ if ($Rollback) {
             # Step 1 - Power off
             Write-Host "  [1/4] Powering off..." -ForegroundColor Cyan
             if ($vm.PowerState -eq "PoweredOn") {
-                Stop-VM -VM $vm -Confirm:$false -Force -ErrorAction Stop | Out-Null
+                Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
                 Start-Sleep -Seconds 10
             }
             $row.PoweredOff = $true
@@ -962,7 +962,7 @@ foreach ($vm in $vms) {
         # ------------------------------------------------------------------
         Write-Host "  [2/7] Powering off..." -ForegroundColor Cyan
         if ($vm.PowerState -eq "PoweredOn") {
-            Stop-VM -VM $vm -Confirm:$false -Force -ErrorAction Stop | Out-Null
+            Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
             Start-Sleep -Seconds 10
         }
 
