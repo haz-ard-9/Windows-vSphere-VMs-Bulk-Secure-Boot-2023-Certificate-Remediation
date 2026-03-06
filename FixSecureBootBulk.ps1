@@ -354,7 +354,7 @@ function Get-VMDatastoreContext {
     $vmDir   = $vmxPath -replace '^\[.+?\] (.+)/[^/]+$', '$1'
     $ds      = Get-Datastore -Name $dsName -ErrorAction Stop
 
-    $datacenter      = Get-Datacenter | Select-Object -First 1
+    $datacenter      = Get-Datacenter -VM $VMObj
     $datacenterView  = $datacenter | Get-View
     $serviceInstance = Get-View ServiceInstance
 
@@ -862,9 +862,6 @@ if ($CleanupNvram) {
     $nvramToDelete    = [System.Collections.Generic.List[PSObject]]::new()
     $snapshotWarnings = [System.Collections.Generic.List[string]]::new()
 
-    $datacenter      = Get-Datacenter | Select-Object -First 1
-    $datacenterView  = $datacenter | Get-View
-    $dcRef           = $datacenterView.MoRef
     $serviceInstance = Get-View ServiceInstance
     $fileManager     = Get-View $serviceInstance.Content.FileManager
 
@@ -879,6 +876,7 @@ if ($CleanupNvram) {
         $vmDir   = $vmxPath -replace '^\[.+?\] (.+)/[^/]+$', '$1'
 
         try {
+            $dcRef     = (Get-Datacenter -VM $vm | Get-View).MoRef
             $ds        = Get-Datastore -Name $dsName -ErrorAction Stop
             $dsBrowser = Get-View $ds.ExtensionData.Browser
             $spec      = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
