@@ -354,7 +354,7 @@ function Get-VMDatastoreContext {
     $vmDir   = $vmxPath -replace '^\[.+?\] (.+)/[^/]+$', '$1'
     $ds      = Get-Datastore -Name $dsName -ErrorAction Stop
 
-    $datacenter      = Get-Datacenter | Select-Object -First 1
+    $datacenter      = Get-Datacenter -VM $VMObj
     $datacenterView  = $datacenter | Get-View
     $serviceInstance = Get-View ServiceInstance
 
@@ -1723,3 +1723,4 @@ if ($noteVMs) {
         Write-Host "    $($n.Notes)"
     }
 }
+
