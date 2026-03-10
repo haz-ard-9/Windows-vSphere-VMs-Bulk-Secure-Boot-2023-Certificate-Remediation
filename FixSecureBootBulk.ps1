@@ -278,13 +278,13 @@ function Resolve-TargetVMs {
             $found
         }
         $resolved = $resolved |
-            Where-Object { $_ -and $_.Guest.OSFullName -match "Windows Server" } |
+            Where-Object { $_ -and $_.Guest.OSFullName -match "Windows (Server|10|11)" } |
             Sort-Object -Property Id -Unique
         return $resolved
     }
 
     # No names specified — return all in-scope Windows Server VMs
-    $all = Get-VM | Where-Object { $_.Guest.OSFullName -match "Windows Server" }
+    $all = Get-VM | Where-Object { $_.Guest.OSFullName -match "Windows (Server|10|11)" }
     if ($SecureBootFilter) {
         $all = $all | Where-Object {
             $_.ExtensionData.Config.Firmware -eq "efi" -and
@@ -1721,4 +1721,5 @@ if ($noteVMs) {
         Write-Host "    $($n.Notes)"
     }
 }
+
 
