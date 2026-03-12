@@ -13,7 +13,7 @@ with Secure Boot enabled after that date.
 
 VMs created before ESXi 8.0.2 have a NULL Platform Key (PK) signature in their
 NVRAM that prevents the standard certificate enrollment process from working. The
-fix is to delete the VM's NVRAM file and let ESXi regenerate it — ESXi 8.0.2 and
+fix is to delete the VM's NVRAM file and let ESXi regenerate it - ESXi 8.0.2 and
 later automatically populate the new NVRAM with the 2023 certificates. Windows can
 then detect and install them without requiring manual firmware enrollment.
 
@@ -25,10 +25,10 @@ script detects this condition (`Valid_Other` status) and can enroll the correct
 Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 
 **References:**
-- [Microsoft KB5068202](https://support.microsoft.com/help/5068202) — AvailableUpdates registry key and monitoring
-- [Microsoft KB5068198](https://support.microsoft.com/help/5068198) — Group Policy deployment (requires Windows Server 2025 ADMX templates)
-- [Broadcom KB 421593](https://knowledge.broadcom.com/external/article/421593) — VMware Platform Key issue
-- [Broadcom KB 423919](https://knowledge.broadcom.com/external/article/423919) — Manual Secure Boot variable update procedure
+- [Microsoft KB5068202](https://support.microsoft.com/help/5068202) - AvailableUpdates registry key and monitoring
+- [Microsoft KB5068198](https://support.microsoft.com/help/5068198) - Group Policy deployment (requires Windows Server 2025 ADMX templates)
+- [Broadcom KB 421593](https://knowledge.broadcom.com/external/article/421593) - VMware Platform Key issue
+- [Broadcom KB 423919](https://knowledge.broadcom.com/external/article/423919) - Manual Secure Boot variable update procedure
 
 ---
 
@@ -38,11 +38,11 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 - **ESXi 8.0.2 or later** on all hosts where target VMs are running
   - Earlier ESXi versions will not regenerate NVRAM with 2023 certificates
   - Check host versions: `Get-VMHost | Select Name, Version` in PowerCLI
-- **vCenter Server** — the script connects via the PowerCLI vCenter API
+- **vCenter Server** - the script connects via the PowerCLI vCenter API
 
 ### VM Hardware Version
-- **Hardware version 13 or later** (introduced in vSphere 6.5) — required for EFI firmware and Secure Boot support
-- **Hardware version 14 or later** — required for vTPM (relevant to the BitLocker safety check)
+- **Hardware version 13 or later** (introduced in vSphere 6.5) - required for EFI firmware and Secure Boot support
+- **Hardware version 14 or later** - required for vTPM (relevant to the BitLocker safety check)
 - VMs below version 13 will be silently excluded by the EFI/Secure Boot filter and will not appear in the target list
 - Check hardware versions:
   ```powershell
@@ -54,7 +54,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 ### VMware Tools
 - **VMware Tools must be installed, running, and recognized by vCenter** on all target VMs
   - The script uses `Invoke-VMScript` for all guest operations; vCenter will reject these calls if Tools is not running
-  - Tools version **10.0 or later** recommended — older versions may not support all script execution features
+  - Tools version **10.0 or later** recommended - older versions may not support all script execution features
   - "Open VM Tools" (OVT) is supported on Windows Server 2019 and later as it ships inbox, but the standard VMware Tools package is preferred for full compatibility
 - Check Tools status across all VMs:
   ```powershell
@@ -66,7 +66,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 - VMs reporting `toolsNotInstalled`, `toolsNotRunning`, or `toolsOld` should be remediated before running the script
 
 ### Guest OS
-- **Windows 10, Windows 11, and Windows Server 2016, 2019, or 2022**
+- **Windows Server 2016, 2019, or 2022**
 - VMs must be configured with **EFI firmware** and **Secure Boot enabled** at the hypervisor level
 - Domain, Server, or Local admin credentials with rights to run scheduled tasks and modify HKLM registry keys on the specified Windows VMs
 
@@ -79,7 +79,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 ## Installing PowerCLI
 
 PowerCLI is VMware's PowerShell module for managing vSphere infrastructure.
-It must be installed on the machine you run this script from — it does not need
+It must be installed on the machine you run this script from - it does not need
 to be installed on the VMs themselves.
 
 ### Install from the PowerShell Gallery (recommended)
@@ -163,6 +163,12 @@ or you will get HTML instead of the binary.
 Place the file in the same directory as the script. The relative path
 `.\WindowsOEMDevicesPK.der` is used in all examples below.
 
+> **Note:** Broadcom KB 423919 references a file called `PK_SigListContent.bin`
+> which does not exist in the Microsoft repository. `WindowsOEMDevicesPK.der`
+> is the correct file for ESXi 8.x SetupMode enrollment. The script converts it
+> from DER certificate format to EFI Signature List format internally using
+> `Format-SecureBootUEFI` - no manual conversion is required.
+
 ---
 
 ## Usage
@@ -219,7 +225,7 @@ Then pass it with `-VMListCsv`:
 .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred -RetainSnapshots
 ```
 
-You can also combine `-VMName` and `-VMListCsv` — they are merged and deduplicated:
+You can also combine `-VMName` and `-VMListCsv` - they are merged and deduplicated:
 
 ```powershell
 .\FixSecureBootBulk.ps1 -VMName "vm01" -VMListCsv ".\batch1.csv" -GuestCredential $cred
@@ -249,7 +255,7 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-Rollback` | `switch` | Restore original NVRAM and revert to snapshot for target VMs. |
 | `-BitLockerBackupShare` | `string` | UNC path to a file share for BitLocker recovery key backups. Required to process VMs with active BitLocker. Example: `\\server\BitLockerKeys` |
 | `-PKDerPath` | `string` | Path to `WindowsOEMDevicesPK.der`. When provided, enrolls the Windows OEM Devices Platform Key on any VM where the PK is NULL, invalid, or an ESXi-generated placeholder (`Valid_Other`). See [Preparing for PK Remediation](#preparing-for-pk-remediation). |
-| `-KEKDerPath` | `string` | Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional — only needed if KEK 2023 is absent after NVRAM regeneration, which should not occur on ESXi 8.0.2+. |
+| `-KEKDerPath` | `string` | Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional - only needed if KEK 2023 is absent after NVRAM regeneration, which should not occur on ESXi 8.0.2+. |
 | `-WaitSeconds` | `int` | Seconds to wait after reboot before polling for VMware Tools. Default: `90`. |
 
 ---
@@ -294,7 +300,7 @@ For each VM in the main remediation mode, the script performs the following step
 |--------|---------|--------|
 | `Valid_WindowsOEM` | Proper Microsoft Windows OEM Devices PK | No action |
 | `Valid_Microsoft` | Microsoft-signed PK | No action |
-| `Valid_Other` | ESXi-generated placeholder (ESXi < 9.0) — will not authenticate future Windows Update KEK changes | Enroll proper PK |
+| `Valid_Other` | ESXi-generated placeholder (ESXi < 9.0) - will not authenticate future Windows Update KEK changes | Enroll proper PK |
 | `Invalid_NULL` | No PK data present | Enroll proper PK |
 | `Not checked` | Step 8 was not reached (cert update failed) | Resolve cert update first |
 
@@ -314,17 +320,17 @@ tracks progress. Bits clear as each step completes:
 
 | Value | Meaning |
 |-------|---------|
-| `0x5944` | Starting state — all update steps needed |
+| `0x5944` | Starting state - all update steps needed |
 | `0x4100` | KEK/DB certs applied, Boot Manager update pending (after first task run + reboot) |
 | `0x4000` | Fully complete |
 
 ### Verification
 
 Final status is read from:
-- `UEFICA2023Status` under `HKLM:\...\SecureBoot\Servicing` — expected value: `Updated`
-- `Get-SecureBootUEFI kek` — must contain `Microsoft Corporation KEK 2K CA 2023`
-- `Get-SecureBootUEFI db` — must contain `Windows UEFI CA 2023`
-- `Get-SecureBootUEFI PK` — expected `Valid_WindowsOEM` after PK enrollment
+- `UEFICA2023Status` under `HKLM:\...\SecureBoot\Servicing` - expected value: `Updated`
+- `Get-SecureBootUEFI kek` - must contain `Microsoft Corporation KEK 2K CA 2023`
+- `Get-SecureBootUEFI db` - must contain `Windows UEFI CA 2023`
+- `Get-SecureBootUEFI PK` - expected `Valid_WindowsOEM` after PK enrollment
 
 ---
 
@@ -347,7 +353,7 @@ The recommended workflow when processing VMs in batches is:
 ```
 
 > **Important:** Always run `-CleanupSnapshots` before `-CleanupNvram`. The snapshot
-> is the rollback mechanism — removing the `.nvram_old` file before the snapshot is
+> is the rollback mechanism - removing the `.nvram_old` file before the snapshot is
 > gone leaves you without a recovery path.
 
 ---
@@ -427,7 +433,7 @@ trigger BitLocker recovery mode on the next boot if protection is active.
 ### Without `-BitLockerBackupShare` (default)
 
 Any VM with BitLocker active is **skipped** with a warning. This is the safe
-default — no changes are made to the VM.
+default - no changes are made to the VM.
 
 ### With `-BitLockerBackupShare`
 
@@ -435,12 +441,12 @@ When a UNC share path is provided, the script handles BitLocker automatically
 before proceeding with remediation:
 
 1. **Exports all recovery keys** from the guest and writes them to the share as
-   `VMName_BitLockerKeys_YYYYMMDD_HHMMSS.txt` — one file per VM, one entry per
+   `VMName_BitLockerKeys_YYYYMMDD_HHMMSS.txt` - one file per VM, one entry per
    protected volume
-2. **Aborts if the backup fails** — the VM is skipped rather than risking a lockout
+2. **Aborts if the backup fails** - the VM is skipped rather than risking a lockout
 3. **Suspends BitLocker** with `RebootCount 2`, covering the power-off/on cycle
    and the post-cert-update reboot (steps 2 and 6)
-4. **Proceeds with full remediation** — NVRAM rename, cert update, registry fix
+4. **Proceeds with full remediation** - NVRAM rename, cert update, registry fix
 5. BitLocker **automatically resumes** after the second reboot with no manual
    intervention required
 
@@ -489,14 +495,14 @@ to the Secure Boot database.
 The script uses UEFI SetupMode, a feature available on ESXi 8.0 and later:
 
 1. Sets `uefi.secureBootMode.overrideOnce = SetupMode` on the VM's VMX configuration
-2. Reboots the VM — the UEFI enters Setup Mode on the next boot, temporarily
+2. Reboots the VM - the UEFI enters Setup Mode on the next boot, temporarily
    allowing PK enrollment without requiring an existing PK signature
 3. Copies `WindowsOEMDevicesPK.der` into the guest
 4. Runs `Format-SecureBootUEFI | Set-SecureBootUEFI` in an elevated guest session
    to convert the DER certificate to EFI Signature List format and enroll it
 5. Clears the VMX option, reboots, and verifies the PK reads as `Valid_WindowsOEM`
 
-The VMX option `uefi.secureBootMode.overrideOnce` is single-use — it is
+The VMX option `uefi.secureBootMode.overrideOnce` is single-use - it is
 automatically cleared after the next boot regardless of whether enrollment
 succeeded, so no persistent security relaxation is introduced.
 
@@ -519,6 +525,30 @@ restrictions in most environments. A separate step-by-step guide covering the
 full DC procedure (including FSMO role management, replication verification, PDC
 Emulator transfer, and manual PK enrollment) is provided in
 `DC_SecureBoot_Manual_Steps.md`.
+
+---
+
+## Manual Remediation (No Scripts)
+
+For environments where PowerShell script execution is restricted by security
+policy, a fully manual version of the remediation procedure is provided in
+`SecureBoot_Manual_NoScript.md`.
+
+This guide covers the complete process using only the vSphere Client GUI,
+Registry Editor, and Task Scheduler, with individual typed commands where
+PowerShell is needed. No `.ps1` files are required and no changes to execution
+policy are needed.
+
+It includes:
+- Step-by-step vSphere Client instructions for all hypervisor operations
+  (snapshot, NVRAM rename, SetupMode, datastore cleanup)
+- Registry Editor and Task Scheduler instructions for the Windows-side update
+- PK enrollment steps using individual PowerShell commands typed directly into
+  an elevated console
+- BitLocker guidance including recovery key backup and suspension
+- Event Viewer instructions for confirming success via Event ID 1808
+- A reference table of relevant Broadcom and Microsoft documentation
+- A printable checklist
 
 ---
 
@@ -552,10 +582,10 @@ Get-ItemPropertyValue "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot" -Name 
 ```
 
 If `AvailableUpdates` is `0x4000` after triggering the task, the update is
-complete — a second reboot may be required for `UEFICA2023Status` to flip
+complete - a second reboot may be required for `UEFICA2023Status` to flip
 to `Updated`.
 
-### PK enrollment failed — `PKEnrolled: False`
+### PK enrollment failed - `PKEnrolled: False`
 
 If step 9 completes but `PKEnrolled` is `False`, the most likely cause is UAC
 preventing `Invoke-VMScript` from running the enrollment in an elevated context.
@@ -572,7 +602,7 @@ Format-SecureBootUEFI -Name PK `
 Set-SecureBootUEFI -Time "2025-10-23T11:00:00Z"
 ```
 
-If you have already rebooted past the SetupMode window, re-run the script — it
+If you have already rebooted past the SetupMode window, re-run the script - it
 will detect `Valid_Other` again and retry the full step 9 sequence.
 
 ### PK still shows `Valid_Other` after enrollment
@@ -586,7 +616,7 @@ enrollment script ran.
 
 If the script times out waiting for VMware Tools after a reboot, the VM is likely
 just slow to boot. The snapshot is retained automatically in this case. You can
-re-run the script against the VM after it comes back up — it will detect the
+re-run the script against the VM after it comes back up - it will detect the
 existing `.nvram_old` file and skip the rename step if the NVRAM has already been
 regenerated, or you can complete the registry steps manually using the verification
 commands in the [Verification](#verification) section above.
