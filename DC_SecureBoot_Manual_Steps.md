@@ -155,7 +155,7 @@ $nvramFile = $results.File | Where-Object { $_.Path -notmatch "_old" } | Select-
 $oldPath = "[$dsName] $vmDir/$($nvramFile.Path)"
 $newPath = "[$dsName] $vmDir/$($nvramFile.Path -replace '\.nvram$', '.nvram_old')"
 
-$dcRef = (Get-Datacenter | Select-Object -First 1 | Get-View).MoRef
+$dcRef = (Get-Datacenter -VM $vm | Get-View).MoRef
 $fm    = Get-View (Get-View ServiceInstance).Content.FileManager
 $task  = $fm.MoveDatastoreFile_Task($oldPath, $dcRef, $newPath, $dcRef, $true)
 
@@ -553,7 +553,7 @@ $nvramFile = $results.File | Where-Object { $_.Path -notmatch "_old" } | Select-
 $oldPath = "[$dsName] $vmDir/$($nvramFile.Path)"
 $newPath = "[$dsName] $vmDir/$($nvramFile.Path -replace '\.nvram$', '.nvram_old')"
 
-$dcRef = (Get-Datacenter | Select-Object -First 1 | Get-View).MoRef
+$dcRef = (Get-Datacenter -VM $vm | Get-View).MoRef
 $fm    = Get-View (Get-View ServiceInstance).Content.FileManager
 $task  = $fm.MoveDatastoreFile_Task($oldPath, $dcRef, $newPath, $dcRef, $true)
 
