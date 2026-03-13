@@ -28,7 +28,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 - [Microsoft KB5068202](https://support.microsoft.com/help/5068202) - AvailableUpdates registry key and monitoring
 - [Microsoft KB5068198](https://support.microsoft.com/help/5068198) - Group Policy deployment (requires Windows Server 2025 ADMX templates)
 - [Broadcom KB 421593](https://knowledge.broadcom.com/external/article/421593) - VMware Platform Key issue
-- [Broadcom KB 423919](https://knowledge.broadcom.com/external/article/423919) - Manual Secure Boot variable update procedure
+- [Broadcom KB 423919](https://knowledge.broadcom.com/external/article/423919) - Manual Update of the Secure Boot Platform Key in Virtual Machines
 
 ---
 
@@ -43,6 +43,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 ### VM Hardware Version
 - **Hardware version 13 or later** (introduced in vSphere 6.5) - required for EFI firmware and Secure Boot support
 - **Hardware version 14 or later** - required for vTPM (relevant to the BitLocker safety check)
+- **Hardware version 21 or later** - required for ESXi to populate regenerated NVRAM with the 2023 KEK certificate. VMs on version 13-20 will have NVRAM regenerated but the KEK will not be present afterward; upgrade hardware version before running the script on these VMs
 - VMs below version 13 will be silently excluded by the EFI/Secure Boot filter and will not appear in the target list
 - Check hardware versions:
   ```powershell
@@ -112,26 +113,17 @@ Update-Module -Name VMware.PowerCLI
 
 ### Configure PowerCLI (one-time setup)
 
-Suppress the Customer Experience Improvement Program prompt:
+Suppress the Customer Experience Improvement Program prompt and allow
+connections to vCenter servers with self-signed certificates:
 
 ```powershell
 Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -Confirm:$false
+Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope User -Confirm:$false
 ```
 
-The script does **not** modify your PowerCLI certificate configuration. Your
-existing `InvalidCertificateAction` setting is used as-is. If your vCenter has
-a properly signed certificate, leave this at its default and certificate
-validation will work normally.
-
-If your vCenter uses a self-signed or untrusted certificate, you can either
-configure this once permanently:
-
-```powershell
-Set-PowerCLIConfiguration -InvalidCertificateAction Warn -Scope User -Confirm:$false
-```
-
-or pass `-IgnoreCertificateWarnings` when calling the script to suppress
-validation for that session only (see [Parameters](#parameters)).
+> The script calls `Set-PowerCLIConfiguration -InvalidCertificateAction Ignore`
+> automatically on first run, so this step is optional but useful if you want
+> to suppress the warning permanently.
 
 ---
 
@@ -172,11 +164,9 @@ or you will get HTML instead of the binary.
 Place the file in the same directory as the script. The relative path
 `.\WindowsOEMDevicesPK.der` is used in all examples below.
 
-> **Note:** Broadcom KB 423919 references a file called `PK_SigListContent.bin`
-> which does not exist in the Microsoft repository. `WindowsOEMDevicesPK.der`
-> is the correct file for ESXi 8.x SetupMode enrollment. The script converts it
-> from DER certificate format to EFI Signature List format internally using
-> `Format-SecureBootUEFI` - no manual conversion is required.
+> **Note:** The script converts `WindowsOEMDevicesPK.der` from DER certificate
+> format to EFI Signature List format internally using `Format-SecureBootUEFI` -
+> no manual conversion is required.
 
 ---
 
@@ -266,7 +256,6 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-PKDerPath` | `string` | Path to `WindowsOEMDevicesPK.der`. When provided, enrolls the Windows OEM Devices Platform Key on any VM where the PK is NULL, invalid, or an ESXi-generated placeholder (`Valid_Other`). See [Preparing for PK Remediation](#preparing-for-pk-remediation). |
 | `-KEKDerPath` | `string` | Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional - only needed if KEK 2023 is absent after NVRAM regeneration, which should not occur on ESXi 8.0.2+. |
 | `-WaitSeconds` | `int` | Seconds to wait after reboot before polling for VMware Tools. Default: `90`. |
-| `-IgnoreCertificateWarnings` | `switch` | Sets PowerCLI `InvalidCertificateAction` to `Ignore` for the current session before connecting to vCenter. Only use this if your vCenter uses a self-signed or untrusted certificate. Omitting this flag leaves your existing PowerCLI certificate configuration unchanged. |
 
 ---
 
@@ -500,7 +489,7 @@ Without a proper PK, Microsoft cannot sign KEK updates that Windows will accept.
 This is not an immediate boot failure risk, but it blocks future security updates
 to the Secure Boot database.
 
-### PK enrollment method (ESXi 8.x)
+### PK enrollment method used by this script (ESXi 8.x)
 
 The script uses UEFI SetupMode, a feature available on ESXi 8.0 and later:
 
@@ -516,13 +505,25 @@ The VMX option `uefi.secureBootMode.overrideOnce` is single-use - it is
 automatically cleared after the next boot regardless of whether enrollment
 succeeded, so no persistent security relaxation is introduced.
 
+### Broadcom-documented manual method (all ESXi versions)
+
+Broadcom KB 423919 (updated March 2026) documents a manual procedure using
+`uefi.allowAuthBypass` and a FAT32 VMDK that applies to all ESXi versions
+(7.x, 8.x, 9.x). That procedure enrolls the PK via the UEFI setup UI rather
+than from the guest OS. The KB also documents manual KEK enrollment for
+environments where the KEK 2023 certificate is not present.
+
+The SetupMode approach used by this script is an alternative that is confirmed
+working on ESXi 8.x and can be fully automated. For manual procedures or ESXi
+7.x hosts (where SetupMode is not available), follow Broadcom KB 423919.
+For a no-script walkthrough of the SetupMode method, see `SecureBoot_Manual_NoScript.md`.
+
 ### ESXi 7.x (not supported by this script)
 
-For ESXi 7.x hosts, PK enrollment requires a different procedure: a FAT32 VMDK
-containing `WindowsOEMDevicesPK.der` attached to the VM, and manual navigation
-of the UEFI setup UI. This script detects ESXi 7.x hosts at step 9 and emits a
-warning with instructions, but cannot automate this path. See Broadcom KB 423919
-for the full manual procedure.
+This script cannot automate PK remediation on ESXi 7.x hosts. For these hosts,
+follow the Broadcom KB 423919 manual procedure using `uefi.allowAuthBypass` and
+a FAT32 VMDK. The script will detect ESXi 7.x hosts at step 9 and emit a warning
+with instructions.
 
 ---
 
