@@ -622,7 +622,7 @@ $val = Get-ItemPropertyValue "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
 Write-Host "AvailableUpdates after second task run: 0x$("{0:X4}" -f $val)"
 '@
 
-# Final verification - registry status and firmware cert presence
+# Final verification - registry status, firmware cert presence, and event log
 $verifyScript = @'
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
 $svcPath = "$regPath\Servicing"
@@ -650,6 +650,43 @@ try {
     $result["KEK_2023"] = "CheckFailed"
     $result["DB_2023"]  = "CheckFailed"
 }
+
+# Event log - System / Microsoft-Windows-TPM-WMI (KB 5016061)
+# 1808: all certs + boot manager applied to firmware (definitive success)
+# 1801: certs updated but not yet applied to firmware (error - device needs attention)
+# 1802: update blocked by known firmware issue (error - contact OEM)
+# 1803: no PK-signed KEK found (error - PK remediation required)
+# 1800: reboot required before update can proceed (warning)
+# 1795: firmware returned error on variable write (error - contact OEM)
+# Note: 1808 may not fire until an extra reboot after the update task completes.
+# Absence of 1808 does not mean failure - use registry status as primary truth.
+$evtResult = @{
+    Event1808 = $false; Event1801 = $false; Event1802 = $false
+    Event1803 = $false; Event1800 = $false; Event1795 = $false
+}
+try {
+    $evts = Get-WinEvent -FilterHashtable @{
+        LogName      = "System"
+        ProviderName = "Microsoft-Windows-TPM-WMI"
+        Id           = @(1795,1800,1801,1802,1803,1808)
+    } -MaxEvents 50 -EA Stop | Sort-Object TimeCreated -Descending
+    foreach ($e in $evts) {
+        switch ($e.Id) {
+            1808 { $evtResult.Event1808 = $true }
+            1801 { $evtResult.Event1801 = $true }
+            1802 { $evtResult.Event1802 = $true }
+            1803 { $evtResult.Event1803 = $true }
+            1800 { $evtResult.Event1800 = $true }
+            1795 { $evtResult.Event1795 = $true }
+        }
+    }
+} catch {}
+$result["Evt1808"] = $evtResult.Event1808.ToString()
+$result["Evt1801"] = $evtResult.Event1801.ToString()
+$result["Evt1802"] = $evtResult.Event1802.ToString()
+$result["Evt1803"] = $evtResult.Event1803.ToString()
+$result["Evt1800"] = $evtResult.Event1800.ToString()
+$result["Evt1795"] = $evtResult.Event1795.ToString()
 
 $result | ConvertTo-Json -Compress
 '@
@@ -1228,6 +1265,12 @@ foreach ($vm in $vms) {
         DB_2023             = "Not checked"
         FinalStatus         = "Not checked"
         UEFICA2023Error     = ""
+        Evt1808             = ""
+        Evt1801             = ""
+        Evt1802             = ""
+        Evt1803             = ""
+        Evt1800             = ""
+        Evt1795             = ""
         PK_Status           = "Not checked"
         PKEnrolled          = $false
         PKRemediated        = $false
@@ -1410,16 +1453,46 @@ foreach ($vm in $vms) {
             $row.Notes += "UEFICA2023Error key present (value: $($verifyData.UEFICA2023ErrorValue)) - deployment error not visible in Event Log; trace via Secure Boot DB/DBX events. "
         }
 
+        # Populate event log results
+        $row.Evt1808 = $verifyData.Evt1808
+        $row.Evt1801 = $verifyData.Evt1801
+        $row.Evt1802 = $verifyData.Evt1802
+        $row.Evt1803 = $verifyData.Evt1803
+        $row.Evt1800 = $verifyData.Evt1800
+        $row.Evt1795 = $verifyData.Evt1795
+
+        # Flag error events in Notes. 1808 absence is not flagged - it may not
+        # fire until an extra reboot after the task completes (confirmed in testing).
+        if ($verifyData.Evt1801 -eq "True") {
+            $row.Notes += "Event 1801: certs updated but not yet applied to firmware - an additional reboot may be required. "
+        }
+        if ($verifyData.Evt1802 -eq "True") {
+            $row.Notes += "Event 1802: update blocked by known firmware issue - contact OEM for firmware update. "
+        }
+        if ($verifyData.Evt1803 -eq "True") {
+            $row.Notes += "Event 1803: no PK-signed KEK found - PK remediation required. "
+        }
+        if ($verifyData.Evt1795 -eq "True") {
+            $row.Notes += "Event 1795: firmware returned error on Secure Boot variable write - contact OEM for firmware update. "
+        }
+        if ($verifyData.Evt1800 -eq "True") {
+            $row.Notes += "Event 1800: reboot required before Secure Boot update can proceed. "
+        }
+
         $certGood = ($row.FinalStatus -eq "Updated"   -and
                      $row.KEK_2023   -eq "True"        -and
                      $row.DB_2023    -eq "True"         -and
                      $row.UEFICA2023Error -eq "")
 
         $color = if ($certGood) { "Green" } else { "Yellow" }
-        Write-Host (("  Status: {0} | KEK 2023: {1} | DB 2023: {2} | AvailableUpdates: {3}{4}") -f
+        Write-Host (("  Status: {0} | KEK 2023: {1} | DB 2023: {2} | AvailableUpdates: {3} | Evt 1808: {4}{5}") -f
             $row.FinalStatus, $row.KEK_2023, $row.DB_2023,
-            $verifyData.AvailableUpdates,
+            $verifyData.AvailableUpdates, $row.Evt1808,
             $(if ($row.UEFICA2023Error) { " | RegError: $($row.UEFICA2023Error)" } else { "" })) -ForegroundColor $color
+        if ($verifyData.Evt1801 -eq "True") { Write-Host "    Event 1801: certs not yet applied to firmware - additional reboot may be needed." -ForegroundColor Yellow }
+        if ($verifyData.Evt1802 -eq "True") { Write-Host "    Event 1802: update blocked by known firmware issue - contact OEM." -ForegroundColor Red }
+        if ($verifyData.Evt1803 -eq "True") { Write-Host "    Event 1803: no PK-signed KEK found - PK remediation required." -ForegroundColor Yellow }
+        if ($verifyData.Evt1795 -eq "True") { Write-Host "    Event 1795: firmware error on variable write - contact OEM." -ForegroundColor Red }
 
         # ------------------------------------------------------------------
         # Step 8 - Platform Key (PK) check
@@ -1690,7 +1763,8 @@ Write-Host "SUMMARY" -ForegroundColor White
 Write-Host "$('='*60)" -ForegroundColor White
 $report | Format-Table VMName, SnapshotCreated, BitLockerKeysBacked, BitLockerSuspended,
     NVRAMRenamed, KEK_AfterNVRAM, UpdateTriggered, KEK_2023, DB_2023,
-    FinalStatus, UEFICA2023Error, PK_Status, PKEnrolled, PKRemediated, SnapshotRetained, Notes -AutoSize
+    FinalStatus, UEFICA2023Error, Evt1808, Evt1801, Evt1802, Evt1803, Evt1800, Evt1795,
+    PK_Status, PKEnrolled, PKRemediated, SnapshotRetained, Notes -AutoSize
 
 $csvPath = ".\SecureBoot_Bulk_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 $report | Export-Csv -Path $csvPath -NoTypeInformation
