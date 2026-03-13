@@ -280,7 +280,20 @@ Reg Error key    : Not present (no error)
 > **Important:** `UEFICA2023Error` does not appear in the Windows Event Log.
 > If this key exists with a non-zero value, a deployment error has occurred
 > even if `UEFICA2023Status` shows `Updated`. Note the error value and check
-> Event Viewer (System log, TPM-WMI source) for Event ID 1795 or 1803.
+> Event Viewer (System log, TPM-WMI source) for the events below.
+
+**Check Event Viewer for relevant TPM-WMI events (System log):**
+
+| Event ID | Meaning |
+|----------|---------|
+| **1808** | Success - all certificates and boot manager applied to firmware |
+| **1801** | ERROR - certificates updated but not yet applied to firmware; an additional reboot may be required |
+| **1802** | ERROR - update blocked by known firmware issue; contact OEM for firmware update |
+| **1803** | ERROR - no PK-signed KEK found; PK remediation (Step 9) required |
+| **1800** | Warning - reboot required before Secure Boot update can proceed |
+| **1795** | ERROR - firmware returned error on variable write; contact OEM for firmware update |
+
+Event 1808 may not appear until an extra reboot after the update task completes. Absence of 1808 alone is not a failure indicator - use `UEFICA2023Status = Updated` as the primary completion signal.
 
 If status shows `InProgress` rather than `Updated`, allow 30 minutes and check
 again. The task runs every 12 hours - trigger it manually if needed.
