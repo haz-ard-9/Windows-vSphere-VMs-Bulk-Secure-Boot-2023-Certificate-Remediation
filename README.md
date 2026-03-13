@@ -112,17 +112,26 @@ Update-Module -Name VMware.PowerCLI
 
 ### Configure PowerCLI (one-time setup)
 
-Suppress the Customer Experience Improvement Program prompt and allow
-connections to vCenter servers with self-signed certificates:
+Suppress the Customer Experience Improvement Program prompt:
 
 ```powershell
 Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -Confirm:$false
-Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope User -Confirm:$false
 ```
 
-> The script calls `Set-PowerCLIConfiguration -InvalidCertificateAction Ignore`
-> automatically on first run, so this step is optional but useful if you want
-> to suppress the warning permanently.
+The script does **not** modify your PowerCLI certificate configuration. Your
+existing `InvalidCertificateAction` setting is used as-is. If your vCenter has
+a properly signed certificate, leave this at its default and certificate
+validation will work normally.
+
+If your vCenter uses a self-signed or untrusted certificate, you can either
+configure this once permanently:
+
+```powershell
+Set-PowerCLIConfiguration -InvalidCertificateAction Warn -Scope User -Confirm:$false
+```
+
+or pass `-IgnoreCertificateWarnings` when calling the script to suppress
+validation for that session only (see [Parameters](#parameters)).
 
 ---
 
@@ -257,6 +266,7 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-PKDerPath` | `string` | Path to `WindowsOEMDevicesPK.der`. When provided, enrolls the Windows OEM Devices Platform Key on any VM where the PK is NULL, invalid, or an ESXi-generated placeholder (`Valid_Other`). See [Preparing for PK Remediation](#preparing-for-pk-remediation). |
 | `-KEKDerPath` | `string` | Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional - only needed if KEK 2023 is absent after NVRAM regeneration, which should not occur on ESXi 8.0.2+. |
 | `-WaitSeconds` | `int` | Seconds to wait after reboot before polling for VMware Tools. Default: `90`. |
+| `-IgnoreCertificateWarnings` | `switch` | Sets PowerCLI `InvalidCertificateAction` to `Ignore` for the current session before connecting to vCenter. Only use this if your vCenter uses a self-signed or untrusted certificate. Omitting this flag leaves your existing PowerCLI certificate configuration unchanged. |
 
 ---
 
