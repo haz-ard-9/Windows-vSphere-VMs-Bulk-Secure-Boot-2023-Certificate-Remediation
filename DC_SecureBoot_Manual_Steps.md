@@ -265,6 +265,8 @@ $svcPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing"
 Write-Host "Servicing Status : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Status' -EA SilentlyContinue))"
 Write-Host "KEK 2023 present : $([System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI kek).Bytes) -match 'Microsoft Corporation KEK 2K CA 2023')"
 Write-Host "DB  2023 present : $([System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI db).Bytes)  -match 'Windows UEFI CA 2023')"
+$errVal = Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Error' -EA SilentlyContinue
+Write-Host "Reg Error key    : $(if ($null -ne $errVal) { "EXISTS - value: $errVal" } else { 'Not present (no error)' })"
 ```
 
 **Expected output:**
@@ -272,7 +274,13 @@ Write-Host "DB  2023 present : $([System.Text.Encoding]::ASCII.GetString((Get-Se
 Servicing Status : Updated
 KEK 2023 present : True
 DB  2023 present : True
+Reg Error key    : Not present (no error)
 ```
+
+> **Important:** `UEFICA2023Error` does not appear in the Windows Event Log.
+> If this key exists with a non-zero value, a deployment error has occurred
+> even if `UEFICA2023Status` shows `Updated`. Note the error value and check
+> Event Viewer (System log, TPM-WMI source) for Event ID 1795 or 1803.
 
 If status shows `InProgress` rather than `Updated`, allow 30 minutes and check
 again. The task runs every 12 hours - trigger it manually if needed.
@@ -642,6 +650,8 @@ $svcPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing"
 Write-Host "Servicing Status : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Status' -EA SilentlyContinue))"
 Write-Host "KEK 2023 present : $([System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI kek).Bytes) -match 'Microsoft Corporation KEK 2K CA 2023')"
 Write-Host "DB  2023 present : $([System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI db).Bytes)  -match 'Windows UEFI CA 2023')"
+$errVal = Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Error' -EA SilentlyContinue
+Write-Host "Reg Error key    : $(if ($null -ne $errVal) { "EXISTS - value: $errVal" } else { 'Not present (no error)' })"
 ```
 
 Expected:
@@ -649,7 +659,13 @@ Expected:
 Servicing Status : Updated
 KEK 2023 present : True
 DB  2023 present : True
+Reg Error key    : Not present (no error)
 ```
+
+> **Important:** `UEFICA2023Error` does not appear in the Windows Event Log.
+> If this key exists with a non-zero value, a deployment error has occurred
+> even if `UEFICA2023Status` shows `Updated`. See the note at Phase 1 Step 8
+> for guidance.
 
 ### Step 10 - Check and remediate Platform Key (PK) on DC2
 
