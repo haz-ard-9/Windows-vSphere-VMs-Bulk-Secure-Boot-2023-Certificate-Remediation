@@ -633,6 +633,12 @@ $result["Servicing_Status"] = Get-ItemPropertyValue -Path $svcPath `
 $result["AvailableUpdates"] = "0x$("{0:X4}" -f (Get-ItemPropertyValue `
     -Path $regPath -Name "AvailableUpdates" -EA SilentlyContinue))"
 
+# UEFICA2023Error: exists only when a deployment error is pending.
+# Errors do NOT appear in Event Log - this key is the only indicator.
+$errVal = Get-ItemPropertyValue -Path $svcPath -Name "UEFICA2023Error" -EA SilentlyContinue
+$result["UEFICA2023ErrorExists"] = ($null -ne $errVal).ToString()
+$result["UEFICA2023ErrorValue"]  = if ($null -ne $errVal) { $errVal } else { "" }
+
 try {
     $result["KEK_2023"] = ([System.Text.Encoding]::ASCII.GetString(
         (Get-SecureBootUEFI kek -EA Stop).Bytes) -match
@@ -1221,6 +1227,7 @@ foreach ($vm in $vms) {
         KEK_2023            = "Not checked"
         DB_2023             = "Not checked"
         FinalStatus         = "Not checked"
+        UEFICA2023Error     = ""
         PK_Status           = "Not checked"
         PKEnrolled          = $false
         PKRemediated        = $false
@@ -1398,14 +1405,21 @@ foreach ($vm in $vms) {
         $row.DB_2023     = $verifyData.DB_2023
         $row.FinalStatus = $verifyData.Servicing_Status
 
-        $certGood = ($row.FinalStatus -eq "Updated" -and
-                     $row.KEK_2023   -eq "True"     -and
-                     $row.DB_2023    -eq "True")
+        if ($verifyData.UEFICA2023ErrorExists -eq "True") {
+            $row.UEFICA2023Error = "ERROR ($($verifyData.UEFICA2023ErrorValue))"
+            $row.Notes += "UEFICA2023Error key present (value: $($verifyData.UEFICA2023ErrorValue)) - deployment error not visible in Event Log; trace via Secure Boot DB/DBX events. "
+        }
+
+        $certGood = ($row.FinalStatus -eq "Updated"   -and
+                     $row.KEK_2023   -eq "True"        -and
+                     $row.DB_2023    -eq "True"         -and
+                     $row.UEFICA2023Error -eq "")
 
         $color = if ($certGood) { "Green" } else { "Yellow" }
-        Write-Host ("  Status: {0} | KEK 2023: {1} | DB 2023: {2} | AvailableUpdates: {3}" -f
+        Write-Host (("  Status: {0} | KEK 2023: {1} | DB 2023: {2} | AvailableUpdates: {3}{4}") -f
             $row.FinalStatus, $row.KEK_2023, $row.DB_2023,
-            $verifyData.AvailableUpdates) -ForegroundColor $color
+            $verifyData.AvailableUpdates,
+            $(if ($row.UEFICA2023Error) { " | RegError: $($row.UEFICA2023Error)" } else { "" })) -ForegroundColor $color
 
         # ------------------------------------------------------------------
         # Step 8 - Platform Key (PK) check
@@ -1676,7 +1690,7 @@ Write-Host "SUMMARY" -ForegroundColor White
 Write-Host "$('='*60)" -ForegroundColor White
 $report | Format-Table VMName, SnapshotCreated, BitLockerKeysBacked, BitLockerSuspended,
     NVRAMRenamed, KEK_AfterNVRAM, UpdateTriggered, KEK_2023, DB_2023,
-    FinalStatus, PK_Status, PKEnrolled, PKRemediated, SnapshotRetained, Notes -AutoSize
+    FinalStatus, UEFICA2023Error, PK_Status, PKEnrolled, PKRemediated, SnapshotRetained, Notes -AutoSize
 
 $csvPath = ".\SecureBoot_Bulk_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 $report | Export-Csv -Path $csvPath -NoTypeInformation
@@ -1730,5 +1744,4 @@ if ($noteVMs) {
         Write-Host "    $($n.Notes)"
     }
 }
-
 
