@@ -96,6 +96,14 @@
     Seconds to wait after issuing a reboot before polling for Tools.
     Default 90. Increase for slower VMs.
 
+.PARAMETER IgnoreCertificateWarnings
+    When specified, sets PowerCLI InvalidCertificateAction to Ignore for the
+    current session before connecting to vCenter. Only use this if your vCenter
+    uses a self-signed or otherwise untrusted certificate and you have accepted
+    that risk. Omitting this flag leaves your existing PowerCLI certificate
+    configuration unchanged. If your vCenter has a properly signed certificate
+    this flag is not needed and should not be used.
+
 .EXAMPLE
     # Run fix on a single VM, remove snapshot on success
     .\FixSecureBootBulk.ps1 -VMName "vm01" -GuestCredential $cred
@@ -134,11 +142,11 @@
     .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" -CleanupNvram
 
     # Full remediation including PK enrollment (recommended - download WindowsOEMDevicesPK.der first)
-    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
+    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der"
 
     # Full remediation with PK enrollment and BitLocker key backup
-    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
+    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
         -BitLockerBackupShare "\\fileserver\BitLockerKeys"
 
@@ -169,7 +177,8 @@ param(
     [string]$BitLockerBackupShare,
     [string]$PKDerPath,
     [string]$KEKDerPath,
-    [int]$WaitSeconds = 90
+    [int]$WaitSeconds = 90,
+    [switch]$IgnoreCertificateWarnings
 )
 
 # =============================================================================
@@ -216,7 +225,11 @@ if ($PKDerPath) {
 # Update the server name below to match your vCenter instance.
 # =============================================================================
 if (-not $global:DefaultVIServer) {
-    Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope User -Confirm:$false
+    if ($IgnoreCertificateWarnings) {
+        Write-Warning "-IgnoreCertificateWarnings specified: disabling certificate validation for this session."
+        Write-Warning "Only use this flag if your vCenter certificate is self-signed or untrusted and you have accepted that risk."
+        Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope Session -Confirm:$false
+    }
     Connect-VIServer -Server "vcenter.yourdomain.com" -Credential (Get-Credential -Message "vCenter credentials")
 }
 
