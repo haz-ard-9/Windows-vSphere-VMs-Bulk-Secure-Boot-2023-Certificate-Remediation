@@ -41,10 +41,12 @@ investigate failures:
 | `UEFICA2023Status = Updated` | `HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing` | All certificates applied successfully |
 | `UEFICA2023Status = InProgress` | Same path | Process is running - wait and check again |
 | `UEFICA2023Error` key exists | Same path | An error occurred - value contains error code |
-| Event ID **1808** (TPM-WMI) | Windows Event Viewer → System log | Success - new Secure Boot certificates applied to firmware |
-| Event ID **1801** (TPM-WMI) | Windows Event Viewer → System log | Certificates staged but not yet applied - not necessarily an error, may resolve after reboot |
-| Event ID **1795** (TPM-WMI) | Windows Event Viewer → System log | Firmware rejected the certificate write - investigate |
-| Event ID **1803** (TPM-WMI) | Windows Event Viewer → System log | No PK-signed KEK found - PK remediation (Step 12) is required |
+| Event ID **1808** (TPM-WMI) | Windows Event Viewer → System log | Success - all certificates and boot manager applied to firmware |
+| Event ID **1801** (TPM-WMI) | Windows Event Viewer → System log | ERROR - certificates updated but not yet applied to firmware; device still needs attention |
+| Event ID **1800** (TPM-WMI) | Windows Event Viewer → System log | Warning - reboot required before Secure Boot update can proceed |
+| Event ID **1802** (TPM-WMI) | Windows Event Viewer → System log | ERROR - update blocked by known firmware issue; contact OEM for firmware update |
+| Event ID **1795** (TPM-WMI) | Windows Event Viewer → System log | ERROR - firmware returned error on Secure Boot variable write; contact OEM |
+| Event ID **1803** (TPM-WMI) | Windows Event Viewer → System log | ERROR - no PK-signed KEK found; PK remediation (Step 12) is required |
 
 **How to find these events in Event Viewer:**
 1. Press **Win + R**, type `eventvwr.msc`, click **OK**
@@ -244,7 +246,20 @@ Expected result: `True`
 
 Expected result: `True`
 
-**If either returns `False`:**
+**Check Platform Key (PK) status:**
+
+```
+$pk = Get-SecureBootUEFI -Name PK
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 44) { Write-Host "PK Status: Invalid_NULL" -ForegroundColor Red } else { $t = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)]); if ($t -match 'Windows OEM Devices') { Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green } elseif ($t -match 'Microsoft') { Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green } else { Write-Host "PK Status: Valid_Other (ESXi placeholder - PK remediation will be needed at Step 12)" -ForegroundColor Yellow } }
+```
+
+Note the PK status now. If it shows `Valid_Other` or `Invalid_NULL` and you
+also need to update the KEK (KEK check returned `False`), you can handle both
+in a single BIOS session using the `allowAuthBypass` + FAT32 disk method from
+Broadcom KB 423919 - this saves an extra reboot compared to doing them
+separately.
+
+**If KEK or DB returns `False`:**
 - Do not proceed with registry changes
 - The NVRAM may not have regenerated correctly
 - Verify the rename in the Datastore Browser (the `.nvram_old` should exist
@@ -385,7 +400,7 @@ Check the value of `UEFICA2023Status`:
 
 Also check whether a `UEFICA2023Error` key exists in the same location. If it
 does and has a non-zero value, an error occurred - note the value and check the
-Event Viewer (see below) for Event ID 1795 or 1803.
+Event Viewer (see below) for Event IDs 1795, 1801, 1802, or 1803.
 
 ### Via PowerShell (alternative)
 
@@ -423,16 +438,21 @@ Expected: `True`
 4. In the **Event sources** box, type `TPM-WMI`, click **OK**
 
 Look for:
-- **Event ID 1808** - success. The new Secure Boot certificates have been
+- **Event ID 1808** - success. All certificates and boot manager have been
   applied to firmware. This is your definitive confirmation that the process
   is complete.
-- **Event ID 1801** - certificates are available but not yet applied. Not
-  necessarily a problem - this often appears before 1808 and resolves after a
-  reboot or the next scheduled task run.
-- **Event ID 1795** - firmware rejected the certificate write. This indicates
-  a compatibility issue, typically requiring an ESXi or firmware update.
-- **Event ID 1803** - no PK-signed KEK found. This means the Platform Key is
-  missing or invalid and Step 12 (PK remediation) is required.
+- **Event ID 1801** - ERROR. Certificates were updated but have not yet been
+  applied to the device firmware. The device still needs attention. Per the
+  user who tested this process: another reboot after running the task twice
+  resolved this.
+- **Event ID 1800** - Warning. A reboot is required before the Secure Boot
+  update can proceed. Reboot and trigger the task again.
+- **Event ID 1802** - ERROR. The update was blocked due to a known firmware
+  issue on the device. Contact your OEM for a firmware update.
+- **Event ID 1795** - ERROR. The firmware returned an error when attempting
+  to write a Secure Boot variable. Contact your OEM for a firmware update.
+- **Event ID 1803** - ERROR. No PK-signed KEK was found. This means the
+  Platform Key is missing or invalid and Step 12 (PK remediation) is required.
 
 **All registry checks must pass and Event ID 1808 should be present before
 considering the process complete.**
