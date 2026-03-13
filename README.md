@@ -342,6 +342,19 @@ Final status is read from:
 - `Get-SecureBootUEFI db` - must contain `Windows UEFI CA 2023`
 - `Get-SecureBootUEFI PK` - expected `Valid_WindowsOEM` after PK enrollment
 
+The script also reads the following event IDs from the System log (TPM-WMI source) per [KB 5016061](https://support.microsoft.com/en-us/topic/secure-boot-db-and-dbx-variable-update-events-37e47cf8-608b-4a87-8175-bdead630eb69) and records them in the CSV output:
+
+| Event ID | Level | Meaning |
+|----------|-------|---------|
+| 1808 | Information | All certificates and boot manager applied to firmware - definitive success signal |
+| 1801 | Error | Certificates updated but not yet applied to firmware - additional reboot may be needed |
+| 1802 | Error | Update blocked by known firmware issue - contact OEM for firmware update |
+| 1803 | Error | No PK-signed KEK found - PK remediation required |
+| 1800 | Warning | Reboot required before Secure Boot update can proceed |
+| 1795 | Error | Firmware returned error on Secure Boot variable write - contact OEM |
+
+Event 1808 absence does **not** block a successful result in the CSV. Testing confirmed it may not fire until an extra reboot after the task completes, even on a fully successful deployment. The registry signals and cert checks are the primary pass/fail gate. Error events (1801, 1802, 1803, 1795, 1800) are recorded in `Notes` when present.
+
 ---
 
 ## Snapshot and Cleanup Workflow
@@ -413,7 +426,8 @@ The main remediation CSV includes these columns:
 
 `VMName`, `SnapshotCreated`, `BitLockerKeysBacked`, `BitLockerSuspended`,
 `NVRAMRenamed`, `KEK_AfterNVRAM`, `DB_AfterNVRAM`, `UpdateTriggered`, `KEK_2023`,
-`DB_2023`, `FinalStatus`, `UEFICA2023Error`, `PK_Status`, `PKEnrolled`, `PKRemediated`,
+`DB_2023`, `FinalStatus`, `UEFICA2023Error`, `Evt1808`, `Evt1801`, `Evt1802`,
+`Evt1803`, `Evt1800`, `Evt1795`, `PK_Status`, `PKEnrolled`, `PKRemediated`,
 `SnapshotRetained`, `Notes`
 
 ### Summary output
