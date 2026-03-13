@@ -18,7 +18,7 @@
 
 .PARAMETER VMName
     One or more VM display names. Accepts wildcards. Can be combined with
-    -VMListCsv — both sources are merged and deduplicated.
+    -VMListCsv - both sources are merged and deduplicated.
     If neither VMName nor VMListCsv is specified, targets all in-scope
     Windows Server VMs with Secure Boot enabled (main mode) or all Windows
     Server VMs (cleanup/rollback modes).
@@ -37,7 +37,7 @@
     Skip snapshot creation entirely. Use when datastore space is constrained
     or snapshots are managed externally. Cannot be combined with
     -RetainSnapshots. Note: without a snapshot there is no automated rollback
-    path — the -Rollback mode will still restore the .nvram_old file if one
+    path - the -Rollback mode will still restore the .nvram_old file if one
     exists, but cannot revert VM state (registry changes etc.).
 
 .PARAMETER RetainSnapshots
@@ -49,7 +49,7 @@
     Snapshot cleanup mode. Finds and removes all Pre-SecureBoot-Fix* snapshots
     on target VMs. Does not require -GuestCredential. Run this after a
     validation period to reclaim datastore space.
-    Always run -CleanupSnapshots BEFORE -CleanupNvram — the snapshot is your
+    Always run -CleanupSnapshots BEFORE -CleanupNvram - the snapshot is your
     rollback path.
 
 .PARAMETER CleanupNvram
@@ -87,7 +87,7 @@
     converts it to EFI Signature List format internally via Format-SecureBootUEFI.
 
 .PARAMETER KEKDerPath
-    Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional — only
+    Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional - only
     needed if the KEK 2023 cert is somehow absent after NVRAM regeneration (should
     not occur on ESXi 8.0.2+). Download:
     https://github.com/microsoft/secureboot_objects/blob/main/PreSignedObjects/KEK/Certificates/microsoft%20corporation%20kek%202k%20ca%202023.der
@@ -95,6 +95,14 @@
 .PARAMETER WaitSeconds
     Seconds to wait after issuing a reboot before polling for Tools.
     Default 90. Increase for slower VMs.
+
+.PARAMETER IgnoreCertificateWarnings
+    When specified, sets PowerCLI InvalidCertificateAction to Ignore for the
+    current session before connecting to vCenter. Only use this if your vCenter
+    uses a self-signed or otherwise untrusted certificate and you have accepted
+    that risk. Omitting this flag leaves your existing PowerCLI certificate
+    configuration unchanged. If your vCenter has a properly signed certificate
+    this flag is not needed and should not be used.
 
 .EXAMPLE
     # Run fix on a single VM, remove snapshot on success
@@ -133,17 +141,17 @@
     # Feed a previous run's output CSV back in to clean up NVRAM for that batch
     .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" -CleanupNvram
 
-    # Full remediation including PK enrollment (recommended — download WindowsOEMDevicesPK.der first)
-    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
+    # Full remediation including PK enrollment (recommended - download WindowsOEMDevicesPK.der first)
+    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der"
 
     # Full remediation with PK enrollment and BitLocker key backup
-    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
+    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
         -BitLockerBackupShare "\\fileserver\BitLockerKeys"
 
 .NOTES
-    Do not include domain controllers in automated runs — handle DCs manually.
+    Do not include domain controllers in automated runs - handle DCs manually.
     VMs with BitLocker active will be skipped unless -BitLockerBackupShare is
     provided, in which case recovery keys are backed up to the share and
     BitLocker is suspended for the duration of the process.
@@ -169,7 +177,8 @@ param(
     [string]$BitLockerBackupShare,
     [string]$PKDerPath,
     [string]$KEKDerPath,
-    [int]$WaitSeconds = 90
+    [int]$WaitSeconds = 90,
+    [switch]$IgnoreCertificateWarnings
 )
 
 # =============================================================================
@@ -216,7 +225,11 @@ if ($PKDerPath) {
 # Update the server name below to match your vCenter instance.
 # =============================================================================
 if (-not $global:DefaultVIServer) {
-    Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope User -Confirm:$false
+    if ($IgnoreCertificateWarnings) {
+        Write-Warning "-IgnoreCertificateWarnings specified: disabling certificate validation for this session."
+        Write-Warning "Only use this flag if your vCenter certificate is self-signed or untrusted and you have accepted that risk."
+        Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope Session -Confirm:$false
+    }
     Connect-VIServer -Server "vcenter.yourdomain.com" -Credential (Get-Credential -Message "vCenter credentials")
 }
 
@@ -283,7 +296,7 @@ function Resolve-TargetVMs {
         return $resolved
     }
 
-    # No names specified — return all in-scope Windows Server VMs
+    # No names specified - return all in-scope Windows Server VMs
     $all = Get-VM | Where-Object { $_.Guest.OSFullName -match "Windows (Server|10|11)" }
     if ($SecureBootFilter) {
         $all = $all | Where-Object {
@@ -637,13 +650,13 @@ $result | ConvertTo-Json -Compress
 
 # Check Platform Key validity in guest (used before PK remediation).
 # PK_Status values:
-#   Valid_WindowsOEM — Microsoft WindowsOEMDevicesPK, proper for Windows Update KEK auth
-#   Valid_Microsoft  — Microsoft-signed PK, proper for Windows Update KEK auth
-#   Valid_Other      — ESXi writes placeholder data when regenerating NVRAM on < 9.0 hosts.
+#   Valid_WindowsOEM - Microsoft WindowsOEMDevicesPK, proper for Windows Update KEK auth
+#   Valid_Microsoft  - Microsoft-signed PK, proper for Windows Update KEK auth
+#   Valid_Other      - ESXi writes placeholder data when regenerating NVRAM on < 9.0 hosts.
 #                      Broadcom KB 423919: "For ESXi versions earlier than 9.0, a valid PK
 #                      is not present." This PK will not authenticate Windows Update KEK
-#                      changes — treat as needing enrollment.
-#   Invalid_NULL     — No PK data at all (original state before NVRAM regeneration)
+#                      changes - treat as needing enrollment.
+#   Invalid_NULL     - No PK data at all (original state before NVRAM regeneration)
 $pkCheckScript = @'
 $ErrorActionPreference = 'SilentlyContinue'
 $WarningPreference     = 'SilentlyContinue'
@@ -989,7 +1002,7 @@ if ($Rollback) {
     Write-Warning "This will power off each VM, restore the original NVRAM, revert to the"
     Write-Warning "Pre-SecureBoot-Fix snapshot (if one exists), and power the VM back on."
     Write-Warning "Registry changes made during the fix are only reverted if a snapshot"
-    Write-Warning "exists — NVRAM restore alone does not undo registry changes."
+    Write-Warning "exists - NVRAM restore alone does not undo registry changes."
     Write-Host ""
 
     $confirm = Read-Host "Proceed with rollback? (Y/N)"
@@ -1414,7 +1427,7 @@ foreach ($vm in $vms) {
                 $row.PK_Status     = $pkData.PK_Status
                 # Only WindowsOEM and Microsoft PKs are trusted by Windows Update
                 # for authenticating future KEK changes. Valid_Other is ESXi's
-                # placeholder — per Broadcom KB 423919 ESXi < 9.0 has no valid PK.
+                # placeholder - per Broadcom KB 423919 ESXi < 9.0 has no valid PK.
                 $pkGood            = $pkData.PK_Status -in @("Valid_WindowsOEM", "Valid_Microsoft")
                 $pkBitLockerActive = $pkData.BitLockerActive -eq "True"
                 $pkColor = if ($pkGood) { "Green" } elseif ($pkData.PK_Status -eq "Valid_Other") { "Yellow" } else { "Red" }
@@ -1432,7 +1445,7 @@ foreach ($vm in $vms) {
         }
 
         if ($pkGood) {
-            Write-Host ("    PK is valid ({0}) — no remediation needed." -f $row.PK_Status) -ForegroundColor Green
+            Write-Host ("    PK is valid ({0}) - no remediation needed." -f $row.PK_Status) -ForegroundColor Green
             $row.PKRemediated = $true
 
         } elseif (-not $PKDerPath) {
@@ -1447,12 +1460,12 @@ foreach ($vm in $vms) {
             #
             # Two methods exist per KB 423919:
             #
-            #   ESXi >= 8.0 (SetupMode) — automated below:
+            #   ESXi >= 8.0 (SetupMode) - automated below:
             #     Set uefi.secureBootMode.overrideOnce = SetupMode, boot into
             #     guest, run Format-SecureBootUEFI | Set-SecureBootUEFI with
             #     WindowsOEMDevicesPK.der (DER-encoded certificate).
             #
-            #   ESXi 7.x (disk + allowAuthBypass + UEFI BIOS UI) — cannot be
+            #   ESXi 7.x (disk + allowAuthBypass + UEFI BIOS UI) - cannot be
             #     automated: requires a FAT32 VMDK containing WindowsOEMDevicesPK.der
             #     attached to the VM, then manually navigating the UEFI setup UI
             #     to Secure Boot Configuration → PK Options → Enroll PK.
@@ -1464,17 +1477,17 @@ foreach ($vm in $vms) {
             # reboot to prevent a PCR 7 change from triggering recovery mode.
             # ------------------------------------------------------------------
 
-            # Check ESXi host version — SetupMode requires ESXi >= 8.0
+            # Check ESXi host version - SetupMode requires ESXi >= 8.0
             $vmHost    = Get-VMHost -VM $vm -ErrorAction SilentlyContinue
             $hostVerStr = $vmHost.Version
             $hostMajor  = [int]($hostVerStr -split '\.')[0]
 
             if ($hostMajor -lt 8) {
-                Write-Warning "  [9/9] PK remediation skipped — ESXi host is version $hostVerStr (requires 8.0+)."
+                Write-Warning "  [9/9] PK remediation skipped - ESXi host is version $hostVerStr (requires 8.0+)."
                 Write-Warning "  The ESXi 7.x method requires a FAT32 VMDK containing WindowsOEMDevicesPK.der,"
                 Write-Warning "  manual UEFI setup UI interaction, and uefi.allowAuthBypass = TRUE."
                 Write-Warning "  See Broadcom KB 423919 for the full manual procedure."
-                $row.Notes += "PK remediation skipped — host ESXi $hostVerStr requires manual disk/BIOS method (KB 423919). "
+                $row.Notes += "PK remediation skipped - host ESXi $hostVerStr requires manual disk/BIOS method (KB 423919). "
             } else {
 
             Write-Host "  [9/9] Remediating PK via UEFI SetupMode (ESXi $hostVerStr)..." -ForegroundColor Yellow
@@ -1485,19 +1498,19 @@ foreach ($vm in $vms) {
             # reach here BitLocker may have auto-resumed. Re-suspend if active.
             $skipPKRemediation = $false
             if ($pkBitLockerActive) {
-                Write-Host "    BitLocker has auto-resumed — re-suspending before SetupMode reboot..." -ForegroundColor Yellow
+                Write-Host "    BitLocker has auto-resumed - re-suspending before SetupMode reboot..." -ForegroundColor Yellow
                 if (-not $BitLockerBackupShare) {
                     Write-Warning "    BitLocker is active but no -BitLockerBackupShare was provided."
-                    Write-Warning "    Cannot safely proceed with PK remediation — skipping to avoid lockout."
-                    $row.Notes += "PK remediation skipped — BitLocker active at PK step, no backup share. Re-run with -BitLockerBackupShare to process. "
+                    Write-Warning "    Cannot safely proceed with PK remediation - skipping to avoid lockout."
+                    $row.Notes += "PK remediation skipped - BitLocker active at PK step, no backup share. Re-run with -BitLockerBackupShare to process. "
                     $skipPKRemediation = $true
                 } else {
-                    # Back up keys again — state may have changed since step 0
+                    # Back up keys again - state may have changed since step 0
                     $pkTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
                     $pkBackupOk  = Backup-BitLockerKeys -VMObj $vm -BackupShare $BitLockerBackupShare -Timestamp "PK_$pkTimestamp"
                     if (-not $pkBackupOk) {
-                        Write-Warning "    Recovery key backup failed — skipping PK remediation to avoid lockout."
-                        $row.Notes += "PK remediation skipped — BitLocker re-backup failed at PK step. "
+                        Write-Warning "    Recovery key backup failed - skipping PK remediation to avoid lockout."
+                        $row.Notes += "PK remediation skipped - BitLocker re-backup failed at PK step. "
                         $skipPKRemediation = $true
                     } else {
                         $suspendOut2  = Invoke-VMScript -VM $vm -ScriptText $bitLockerSuspendScript `
@@ -1520,11 +1533,11 @@ foreach ($vm in $vms) {
             Set-VMXOption -VMObj $vm -Key "uefi.secureBootMode.overrideOnce" -Value "SetupMode"
             $optVal = Get-VMXOption -VMObj (Get-VM -Name $vmName) -Key "uefi.secureBootMode.overrideOnce"
             if ($optVal -ne "SetupMode") {
-                throw "Failed to set uefi.secureBootMode.overrideOnce — check vCenter permissions."
+                throw "Failed to set uefi.secureBootMode.overrideOnce - check vCenter permissions."
             }
             Write-Host "    SetupMode VMX option confirmed." -ForegroundColor Green
 
-            # [2/5] Power off and on — SetupMode takes effect on next boot
+            # [2/5] Power off and on - SetupMode takes effect on next boot
             Write-Host "  [PK 2/5] Rebooting into SetupMode..." -ForegroundColor Cyan
             Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
             Start-Sleep -Seconds 5
@@ -1552,7 +1565,7 @@ foreach ($vm in $vms) {
                         -VM $vm -LocalToGuest -GuestCredential $GuestCredential -ErrorAction Stop
                     Write-Host "    kek2023.der copied." -ForegroundColor Green
                 } catch {
-                    Write-Warning "    Failed to copy KEK der — KEK update will be skipped: $($_.Exception.Message)"
+                    Write-Warning "    Failed to copy KEK der - KEK update will be skipped: $($_.Exception.Message)"
                 }
             }
 
@@ -1583,7 +1596,7 @@ foreach ($vm in $vms) {
 
             # [5/5] Clear SetupMode VMX option, reboot, verify
             Write-Host "  [PK 5/5] Clearing SetupMode, rebooting, and verifying PK..." -ForegroundColor Cyan
-            # Clear explicitly — if enrollment failed the option must be cleared
+            # Clear explicitly - if enrollment failed the option must be cleared
             # before retry to avoid persisting SetupMode unexpectedly
             Set-VMXOption -VMObj (Get-VM -Name $vmName) -Key "uefi.secureBootMode.overrideOnce" -Value ""
             Write-Host "    SetupMode VMX option cleared." -ForegroundColor Gray
@@ -1607,7 +1620,7 @@ foreach ($vm in $vms) {
                 $pkColor = if ($row.PKRemediated) { "Green" } else { "Red" }
                 Write-Host ("  PK Status after remediation: {0}" -f $pkVerifyData.PK_Status) -ForegroundColor $pkColor
                 if (-not $row.PKRemediated) {
-                    $row.Notes += "PK still invalid after enrollment — manual intervention required. "
+                    $row.Notes += "PK still invalid after enrollment - manual intervention required. "
                 }
             }
 
@@ -1623,7 +1636,7 @@ foreach ($vm in $vms) {
         # ------------------------------------------------------------------
         # Snapshot disposition
         # allGood requires: cert update complete AND (PK valid OR remediated
-        # OR no PKDerPath provided — in which case PK is flagged for follow-up
+        # OR no PKDerPath provided - in which case PK is flagged for follow-up
         # but cert update is complete, which is the minimum for allGood)
         # ------------------------------------------------------------------
         $allGood = $certGood -and ($pkGood -or $row.PKRemediated -or (-not $PKDerPath))
@@ -1639,8 +1652,8 @@ foreach ($vm in $vms) {
             if ($RetainSnapshots -and $allGood) {
                 Write-Host "  Snapshot retained (-RetainSnapshots). Run -CleanupSnapshots when ready." -ForegroundColor Yellow
             } elseif (-not $certGood) {
-                Write-Host "  Snapshot retained (cert update incomplete — may need second reboot cycle)." -ForegroundColor Yellow
-                $row.Notes += "Cert update incomplete — may need manual second reboot cycle. "
+                Write-Host "  Snapshot retained (cert update incomplete - may need second reboot cycle)." -ForegroundColor Yellow
+                $row.Notes += "Cert update incomplete - may need manual second reboot cycle. "
             } elseif (-not $allGood) {
                 Write-Host "  Snapshot retained (PK remediation incomplete)." -ForegroundColor Yellow
             }
@@ -1680,7 +1693,7 @@ $failed     = ($report | Where-Object { $_.FinalStatus -eq "ERROR" }).Count
 $pending    = $total - $complete - $skipped - $failed
 $retained   = ($report | Where-Object { $_.SnapshotRetained }).Count
 $blBacked   = ($report | Where-Object { $_.BitLockerKeysBacked -eq $true }).Count
-# PK counters — distinguish already-valid from newly enrolled
+# PK counters - distinguish already-valid from newly enrolled
 # Valid_Other is expected on ESXi-regenerated NVRAM (VMware's own PK).
 # Valid_WindowsOEM / Valid_Microsoft indicate a vendor/MS-signed PK.
 # All three are treated as valid by the script.
@@ -1693,16 +1706,16 @@ $pkNeeds        = ($report | Where-Object { $_.PK_Status -notlike "Valid*" -and 
 
 Write-Host ""
 Write-Host "Completed          : $complete / $total" -ForegroundColor Green
-if ($pkAlreadyValid -gt 0) { Write-Host "PK already valid   : $pkAlreadyValid  (WindowsOEM/Microsoft — no enrollment needed)"  -ForegroundColor Green  }
-if ($pkPlaceholder  -gt 0) { Write-Host "PK placeholder     : $pkPlaceholder  (ESXi-generated — enrolled this run)"              -ForegroundColor Green  }
+if ($pkAlreadyValid -gt 0) { Write-Host "PK already valid   : $pkAlreadyValid  (WindowsOEM/Microsoft - no enrollment needed)"  -ForegroundColor Green  }
+if ($pkPlaceholder  -gt 0) { Write-Host "PK placeholder     : $pkPlaceholder  (ESXi-generated - enrolled this run)"              -ForegroundColor Green  }
 if ($pkEnrolledOk   -gt 0) { Write-Host "PK enrolled        : $pkEnrolledOk  (newly enrolled this run)"                        -ForegroundColor Green  }
-if ($pkEnrolledFail -gt 0) { Write-Host "PK enroll failed   : $pkEnrolledFail  (manual intervention required — see Notes)"     -ForegroundColor Red    }
+if ($pkEnrolledFail -gt 0) { Write-Host "PK enroll failed   : $pkEnrolledFail  (manual intervention required - see Notes)"     -ForegroundColor Red    }
 if ($pkNeeds        -gt 0) { Write-Host "PK still invalid   : $pkNeeds  (provide -PKDerPath and re-run)"                       -ForegroundColor Yellow }
 if ($blBacked       -gt 0) { Write-Host "BL keys backed up  : $blBacked  (files at: $BitLockerBackupShare)"                    -ForegroundColor Yellow }
 if ($skipped        -gt 0) { Write-Host "Skipped (BitLocker): $skipped  (provide -BitLockerBackupShare to process)"            -ForegroundColor Yellow }
 if ($pending        -gt 0) { Write-Host "Pending            : $pending (may need second reboot cycle)"                         -ForegroundColor Yellow }
 if ($failed         -gt 0) { Write-Host "Errors             : $failed"                                                         -ForegroundColor Red    }
-if ($retained       -gt 0) { Write-Host "Snapshots retained : $retained — run -CleanupSnapshots when ready."                   -ForegroundColor Yellow }
+if ($retained       -gt 0) { Write-Host "Snapshots retained : $retained - run -CleanupSnapshots when ready."                   -ForegroundColor Yellow }
 
 if ($pkNeeds -gt 0 -and -not $PKDerPath) {
     Write-Host ""
@@ -1711,7 +1724,7 @@ if ($pkNeeds -gt 0 -and -not $PKDerPath) {
     Write-Host "Then re-run with: -PKDerPath '.\WindowsOEMDevicesPK.der'" -ForegroundColor Cyan
 }
 
-# Notes block — shown separately so nothing is truncated by Format-Table
+# Notes block - shown separately so nothing is truncated by Format-Table
 $noteVMs = $report | Where-Object { $_.Notes -ne "" }
 if ($noteVMs) {
     Write-Host "`nNOTES" -ForegroundColor White
@@ -1721,5 +1734,4 @@ if ($noteVMs) {
         Write-Host "    $($n.Notes)"
     }
 }
-
 
