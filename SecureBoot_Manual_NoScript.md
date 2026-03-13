@@ -23,7 +23,7 @@ not by Windows. The process therefore has two distinct phases:
 
 | Source | Document |
 |--------|----------|
-| Broadcom | [KB 423919 - Manual Update of Secure Boot Variables in Virtual Machines](https://knowledge.broadcom.com/external/article/423919) |
+| Broadcom | [KB 423919 - Manual Update of the Secure Boot Platform Key in Virtual Machines](https://knowledge.broadcom.com/external/article/423919) |
 | Broadcom | [KB 423893 - Secure Boot 2023 Certificate Remediation for ESXi](https://knowledge.broadcom.com/external/article/423893) |
 | Microsoft | [Secure Boot Certificate Updates - Guidance for IT Professionals](https://support.microsoft.com/en-us/topic/secure-boot-certificate-updates-guidance-for-it-professionals-and-organizations-e2b43f9f-b424-42df-bc6a-8476db65ab2f) |
 | Microsoft | [Registry Key Updates for Secure Boot - IT-Managed Updates](https://support.microsoft.com/en-us/topic/registry-key-updates-for-secure-boot-windows-devices-with-it-managed-updates-a7be69c9-4634-42e1-9ca1-df06f43f360d) |
@@ -508,6 +508,14 @@ Suspend-BitLocker -MountPoint "C:" -RebootCount 2
 
 SetupMode allows the PK to be enrolled without requiring the existing PK to
 sign the update. This is set via a VMX configuration option in vSphere Client.
+
+> **Note:** Broadcom KB 423919 (updated March 2026) documents an alternative
+> manual procedure using `uefi.allowAuthBypass` and a FAT32 VMDK for all ESXi
+> versions. That method enrolls the PK via the UEFI setup UI rather than from
+> the guest OS and does not require deleting the NVRAM file. The SetupMode
+> procedure here is an alternative that is confirmed working on ESXi 8.x. If
+> you prefer to follow the Broadcom-documented disk method, refer to KB 423919
+> directly.
 
 **The VM must be powered off for this option to take effect on the next boot.**
 
