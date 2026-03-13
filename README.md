@@ -66,7 +66,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 - VMs reporting `toolsNotInstalled`, `toolsNotRunning`, or `toolsOld` should be remediated before running the script
 
 ### Guest OS
-- **Windows Server 2016, 2019, or 2022**
+- **Windows 10, Windows 11, and Windows Server 2016, 2019, or 2022**
 - VMs must be configured with **EFI firmware** and **Secure Boot enabled** at the hypervisor level
 - Domain, Server, or Local admin credentials with rights to run scheduled tasks and modify HKLM registry keys on the specified Windows VMs
 
