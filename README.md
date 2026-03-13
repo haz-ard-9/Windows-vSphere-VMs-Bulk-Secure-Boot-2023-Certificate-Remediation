@@ -337,6 +337,7 @@ tracks progress. Bits clear as each step completes:
 
 Final status is read from:
 - `UEFICA2023Status` under `HKLM:\...\SecureBoot\Servicing` - expected value: `Updated`
+- `UEFICA2023Error` under `HKLM:\...\SecureBoot\Servicing` - must be absent. This key exists only when a deployment error has occurred and does **not** appear in the Windows Event Log. A VM can show `UEFICA2023Status = Updated` while this key is present; the script treats this as an incomplete result and records it in the `UEFICA2023Error` CSV column and `Notes`.
 - `Get-SecureBootUEFI kek` - must contain `Microsoft Corporation KEK 2K CA 2023`
 - `Get-SecureBootUEFI db` - must contain `Windows UEFI CA 2023`
 - `Get-SecureBootUEFI PK` - expected `Valid_WindowsOEM` after PK enrollment
@@ -412,7 +413,7 @@ The main remediation CSV includes these columns:
 
 `VMName`, `SnapshotCreated`, `BitLockerKeysBacked`, `BitLockerSuspended`,
 `NVRAMRenamed`, `KEK_AfterNVRAM`, `DB_AfterNVRAM`, `UpdateTriggered`, `KEK_2023`,
-`DB_2023`, `FinalStatus`, `PK_Status`, `PKEnrolled`, `PKRemediated`,
+`DB_2023`, `FinalStatus`, `UEFICA2023Error`, `PK_Status`, `PKEnrolled`, `PKRemediated`,
 `SnapshotRetained`, `Notes`
 
 ### Summary output
