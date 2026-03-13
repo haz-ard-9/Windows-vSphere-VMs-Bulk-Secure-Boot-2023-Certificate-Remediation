@@ -82,9 +82,9 @@
     Required for step 9 PK remediation. If omitted, invalid/placeholder PKs are
     reported in the output CSV but not remediated.
 
-    NOTE: Broadcom KB 423919 references PK_SigListContent.bin, which does not exist
-    in the repository. WindowsOEMDevicesPK.der is the correct file. The script
-    converts it to EFI Signature List format internally via Format-SecureBootUEFI.
+    NOTE: The script converts WindowsOEMDevicesPK.der from DER certificate
+    format to EFI Signature List format internally via Format-SecureBootUEFI.
+    No manual conversion is required.
 
 .PARAMETER KEKDerPath
     Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional - only
@@ -95,14 +95,6 @@
 .PARAMETER WaitSeconds
     Seconds to wait after issuing a reboot before polling for Tools.
     Default 90. Increase for slower VMs.
-
-.PARAMETER IgnoreCertificateWarnings
-    When specified, sets PowerCLI InvalidCertificateAction to Ignore for the
-    current session before connecting to vCenter. Only use this if your vCenter
-    uses a self-signed or otherwise untrusted certificate and you have accepted
-    that risk. Omitting this flag leaves your existing PowerCLI certificate
-    configuration unchanged. If your vCenter has a properly signed certificate
-    this flag is not needed and should not be used.
 
 .EXAMPLE
     # Run fix on a single VM, remove snapshot on success
@@ -177,8 +169,7 @@ param(
     [string]$BitLockerBackupShare,
     [string]$PKDerPath,
     [string]$KEKDerPath,
-    [int]$WaitSeconds = 90,
-    [switch]$IgnoreCertificateWarnings
+    [int]$WaitSeconds = 90
 )
 
 # =============================================================================
@@ -225,11 +216,7 @@ if ($PKDerPath) {
 # Update the server name below to match your vCenter instance.
 # =============================================================================
 if (-not $global:DefaultVIServer) {
-    if ($IgnoreCertificateWarnings) {
-        Write-Warning "-IgnoreCertificateWarnings specified: disabling certificate validation for this session."
-        Write-Warning "Only use this flag if your vCenter certificate is self-signed or untrusted and you have accepted that risk."
-        Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope Session -Confirm:$false
-    }
+    Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope User -Confirm:$false
     Connect-VIServer -Server "vcenter.yourdomain.com" -Credential (Get-Credential -Message "vCenter credentials")
 }
 
@@ -1456,20 +1443,18 @@ foreach ($vm in $vms) {
 
         } else {
             # ------------------------------------------------------------------
-            # Step 9 - PK remediation (Broadcom KB 423919)
+            # Step 9 - PK remediation
             #
-            # Two methods exist per KB 423919:
+            # Broadcom KB 423919 (updated March 2026) documents a manual procedure
+            # using uefi.allowAuthBypass + FAT32 VMDK + Force EFI Setup for all
+            # ESXi versions (7.x, 8.x, 9.x). That method requires manual UEFI
+            # UI interaction and cannot be automated.
             #
-            #   ESXi >= 8.0 (SetupMode) - automated below:
-            #     Set uefi.secureBootMode.overrideOnce = SetupMode, boot into
-            #     guest, run Format-SecureBootUEFI | Set-SecureBootUEFI with
-            #     WindowsOEMDevicesPK.der (DER-encoded certificate).
-            #
-            #   ESXi 7.x (disk + allowAuthBypass + UEFI BIOS UI) - cannot be
-            #     automated: requires a FAT32 VMDK containing WindowsOEMDevicesPK.der
-            #     attached to the VM, then manually navigating the UEFI setup UI
-            #     to Secure Boot Configuration → PK Options → Enroll PK.
-            #     This script will detect and report this case but cannot proceed.
+            # This script uses UEFI SetupMode (ESXi 8.0+), an automatable
+            # alternative: uefi.secureBootMode.overrideOnce = SetupMode allows
+            # PK enrollment from the guest OS via Format-SecureBootUEFI.
+            # SetupMode is not available on ESXi 7.x - those hosts require the
+            # manual KB 423919 disk procedure.
             #
             # NOTE: BitLocker suspension from step 0 is consumed by the cert
             # update reboots (steps 2 and 6). If BitLocker has auto-resumed by
@@ -1483,10 +1468,8 @@ foreach ($vm in $vms) {
             $hostMajor  = [int]($hostVerStr -split '\.')[0]
 
             if ($hostMajor -lt 8) {
-                Write-Warning "  [9/9] PK remediation skipped - ESXi host is version $hostVerStr (requires 8.0+)."
-                Write-Warning "  The ESXi 7.x method requires a FAT32 VMDK containing WindowsOEMDevicesPK.der,"
-                Write-Warning "  manual UEFI setup UI interaction, and uefi.allowAuthBypass = TRUE."
-                Write-Warning "  See Broadcom KB 423919 for the full manual procedure."
+                Write-Warning "  [9/9] PK remediation skipped - ESXi host is version $hostVerStr (SetupMode requires 8.0+)."
+                Write-Warning "  For ESXi 7.x, use the manual allowAuthBypass + FAT32 disk procedure in Broadcom KB 423919."
                 $row.Notes += "PK remediation skipped - host ESXi $hostVerStr requires manual disk/BIOS method (KB 423919). "
             } else {
 
@@ -1734,4 +1717,5 @@ if ($noteVMs) {
         Write-Host "    $($n.Notes)"
     }
 }
+
 
