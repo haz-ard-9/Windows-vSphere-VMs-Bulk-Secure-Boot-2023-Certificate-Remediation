@@ -27,7 +27,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 **References:**
 - [Microsoft KB5068202](https://support.microsoft.com/help/5068202) - AvailableUpdates registry key and monitoring
 - [Microsoft KB5068198](https://support.microsoft.com/help/5068198) - Group Policy deployment (requires Windows Server 2025 ADMX templates)
-- [Broadcom KB 421593](https://knowledge.broadcom.com/external/article/421593) - VMware Platform Key issue
+- [Broadcom KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) - NVRAM rename procedure for missing KEK CA 2023 on Windows VMs *(Broadcom has removed this KB; link points to archive.org)*
 - [Broadcom KB 423919](https://knowledge.broadcom.com/external/article/423919) - Manual Update of the Secure Boot Platform Key in Virtual Machines
 
 ---
@@ -213,6 +213,26 @@ $cred = Get-Credential  # Admin account with guest OS access
 .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
     -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
     -BitLockerBackupShare "\\fileserver\BitLockerKeys"
+
+# Connect to a vCenter with a self-signed certificate
+.\FixSecureBootBulk.ps1 -GuestCredential $cred -RetainSnapshots -IgnoreCertificateWarnings
+
+# Assess all VMs - hypervisor-level data only (no guest credentials needed)
+.\FixSecureBootBulk.ps1 -Assess
+
+# Assess all VMs - full data including cert status, registry, and event log
+.\FixSecureBootBulk.ps1 -Assess -GuestCredential $cred
+
+# Upgrade hardware version to meet the version 21 requirement (snapshot taken by default)
+.\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -UpgradeHardware
+
+# Upgrade hardware version and run full remediation in a single pass
+.\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -UpgradeHardware
+
+# Run unattended without the datastore space confirmation prompt
+.\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -Confirm
 ```
 
 ### Using a CSV file for batch processing
@@ -266,6 +286,10 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-KEKDerPath` | `string` | Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional - only needed if KEK 2023 is absent after NVRAM regeneration, which should not occur on ESXi 8.0.2+. |
 | `-WaitSeconds` | `int` | Seconds to wait after reboot before polling for VMware Tools. Default: `90`. |
 | `-IgnoreCertificateWarnings` | `switch` | Sets PowerCLI `InvalidCertificateAction` to `Ignore` for the current session before connecting to vCenter. Only use this if your vCenter uses a self-signed or untrusted certificate. Omitting this flag leaves your existing PowerCLI certificate configuration unchanged. |
+| `-Assess` | `switch` | Read-only assessment mode. No changes are made to any VM. Collects current state for all target VMs and produces a CSV and console summary. See [Assessment Mode](#assessment-mode). Mutually exclusive with all action modes. |
+| `-UpgradeHardware` | `switch` | Upgrades VM hardware version to the latest supported by the host. Can be used standalone (powers off, upgrades, powers on - no cert work) or combined with the main remediation run, where it is inserted between step 2 and step 3. See [Hardware Version Upgrade](#hardware-version-upgrade). |
+| `-CleanupHWSnapshots` | `switch` | Removes all `Pre-HWUpgrade*` snapshots created by standalone `-UpgradeHardware` runs. Run after verifying the hardware upgrade is stable. Does not require `-GuestCredential`. |
+| `-Confirm` | `switch` | Suppresses the "Continue? (Y/N)" datastore space confirmation prompt. Use for unattended or scheduled runs when you have already verified sufficient datastore space. |
 
 ---
 
@@ -274,21 +298,29 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 For each VM in the main remediation mode, the script performs the following steps:
 
 ```
+[Pre]  Pre-check: assess current VM state via guest script to determine entry point.
+       Skips steps already complete based on NVRAM cert status, AvailableUpdates,
+       and UEFICA2023Status. See Smart Step Detection below.
 [0/9] BitLocker / vTPM safety check
       Without -BitLockerBackupShare: skip VM if BitLocker active
       With    -BitLockerBackupShare: export recovery keys to share,
               suspend BitLocker (RebootCount 2), then proceed
 [1/9] Take snapshot (skipped if -NoSnapshot)
-[2/9] Power off VM
-[3/9] Rename vmname.nvram -> vmname.nvram_old on datastore
-[4/9] Power on VM (ESXi regenerates NVRAM with 2023 KEK/DB certs)
+[2/9] Power off VM  (skipped per pre-check if NVRAM already has 2023 certs)
+[2b/9] Upgrade hardware version (only if -UpgradeHardware; skipped if already >= 21)
+[3/9] Rename vmname.nvram -> vmname.nvram_old on datastore  (skipped per pre-check)
+[4/9] Power on VM (ESXi regenerates NVRAM with 2023 KEK/DB certs)  (skipped per pre-check)
       └─ Verify KEK 2023 and DB 2023 are present in new NVRAM
-[5/9] Clear stale Servicing registry state (if any)
+[5/9] Clear stale Servicing registry state (if any)  (skipped per pre-check)
       Set AvailableUpdates = 0x5944 via SYSTEM scheduled task
       Trigger \Microsoft\Windows\PI\Secure-Boot-Update task
-[6/9] Reboot VM
+[6/9] Reboot VM  (skipped if cert update already complete)
       Trigger Secure-Boot-Update task again (completes Boot Manager update)
 [7/9] Verify: Servicing Status = "Updated", KEK 2023 = True, DB 2023 = True
+      Also reads TPM-WMI event log (1808, 1801, 1802, 1803, 1800, 1795) per KB 5016061
+[7b/9] Extra reboot (only if Event 1801 or 1800 present AND Event 1808 absent)
+       Reboots VM, triggers task, re-verifies. If 1801 persists after reboot,
+       diagnoses cause (1802/1795/registry error/stuck AvailableUpdates).
 [8/9] Check Platform Key (PK) validity
       Valid_WindowsOEM / Valid_Microsoft -> no action needed
       Valid_Other (ESXi placeholder) or Invalid_NULL -> proceed to step 9
@@ -302,6 +334,20 @@ For each VM in the main remediation mode, the script performs the following step
       [PK 5/5] Clear SetupMode VMX option, reboot, verify PK = Valid_WindowsOEM
       Remove snapshot on success (unless -RetainSnapshots or -NoSnapshot)
 ```
+
+### Smart Step Detection
+
+Before running any changes, the script runs a lightweight guest assessment to determine which steps are still needed. This prevents unnecessary reboots and NVRAM operations on VMs where prior work (manual or from an earlier script run) has already completed some or all of the process.
+
+| Pre-check result | Entry point | Steps skipped |
+|---|---|---|
+| KEK_2023 = False | Full run | None |
+| KEK_2023 = True, DB_2023 = True | skipNvram | Steps 2/2b/3/4 |
+| AvailableUpdates = 0x4100 | skipToStep6 | Steps 2/2b/3/4/5 |
+| UEFICA2023Status = Updated or 0x4000 | certDone | Steps 2/2b/3/4/5/6 |
+| Cert done + PK valid (or no -PKDerPath) | allDone | Entire VM skipped |
+
+If the VM is powered off when the script runs, or the pre-check fails for any reason, the script falls back to a full run with no steps skipped.
 
 ### PK Status values
 
@@ -425,7 +471,7 @@ The script writes a timestamped CSV to the current directory after each run:
 The main remediation CSV includes these columns:
 
 `VMName`, `SnapshotCreated`, `BitLockerKeysBacked`, `BitLockerSuspended`,
-`NVRAMRenamed`, `KEK_AfterNVRAM`, `DB_AfterNVRAM`, `UpdateTriggered`, `KEK_2023`,
+`NVRAMRenamed`, `HWUpgraded`, `KEK_AfterNVRAM`, `DB_AfterNVRAM`, `UpdateTriggered`, `KEK_2023`,
 `DB_2023`, `FinalStatus`, `UEFICA2023Error`, `Evt1808`, `Evt1801`, `Evt1802`,
 `Evt1803`, `Evt1800`, `Evt1795`, `PK_Status`, `PKEnrolled`, `PKRemediated`,
 `SnapshotRetained`, `Notes`
@@ -561,6 +607,83 @@ restrictions in most environments. A separate step-by-step guide covering the
 full DC procedure (including FSMO role management, replication verification, PDC
 Emulator transfer, and manual PK enrollment) is provided in
 `DC_SecureBoot_Manual_Steps.md`.
+
+---
+
+## Assessment Mode
+
+The `-Assess` switch runs a read-only inventory pass against all target VMs. No changes are made. It produces a CSV and console summary covering:
+
+- VM hardware version and whether it meets the version 21 minimum for KEK regeneration
+- ESXi host name and version
+- Firmware type (EFI vs BIOS) and Secure Boot enabled state
+- Presence of `.nvram_old` file and `Pre-SecureBoot-Fix` snapshot (indicates a remediation is in progress or pending cleanup)
+- KEK 2023, DB 2023, and PK status (requires `-GuestCredential`)
+- `UEFICA2023Status`, `AvailableUpdates`, and `UEFICA2023Error` registry values (requires `-GuestCredential`)
+- TPM-WMI event IDs 1808, 1801, 1802, 1803, 1800, 1795 (requires `-GuestCredential`)
+- BitLocker active state (requires `-GuestCredential`)
+- Derived `ActionNeeded` column summarizing what steps remain per VM
+
+If `-GuestCredential` is omitted, only hypervisor-level data is collected (hardware version, ESXi host, firmware, Secure Boot state, datastore files, snapshot presence). This is useful for a quick pre-remediation inventory without needing guest credentials.
+
+```powershell
+# Hypervisor-level data only
+.\FixSecureBootBulk.ps1 -Assess
+
+# Full assessment including guest cert and registry status
+.\FixSecureBootBulk.ps1 -Assess -GuestCredential $cred
+
+# Assess specific VMs
+.\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -Assess -GuestCredential $cred
+```
+
+The assessment CSV is written to `SecureBoot_Assess_<timestamp>.csv` in the current directory.
+
+---
+
+## Hardware Version Upgrade
+
+Hardware version 21 or later is required for ESXi to populate regenerated NVRAM with the 2023 KEK certificate. VMs below version 21 will have NVRAM regenerated but the KEK will not be present afterward. The `-UpgradeHardware` switch automates the upgrade.
+
+> **Important:** VMware does not provide a supported API or UI method to downgrade VM hardware versions. A snapshot taken before the upgrade is the only supported rollback path. Reverting to the pre-upgrade snapshot restores the previous hardware version. If `-NoSnapshot` is specified, there is no automated rollback path.
+
+### Standalone (upgrade only, no cert work)
+
+By default a `Pre-HWUpgrade_<timestamp>` snapshot is taken before each upgrade to serve as a rollback point. Use `-NoSnapshot` to skip this.
+
+```powershell
+# Upgrade all eligible VMs (snapshot taken by default)
+.\FixSecureBootBulk.ps1 -UpgradeHardware
+
+# Upgrade specific VMs
+.\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -UpgradeHardware
+
+# Upgrade without taking a snapshot (no rollback path)
+.\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -UpgradeHardware -NoSnapshot
+```
+
+Each VM is powered off, upgraded to the latest hardware version supported by its host, and powered back on. VMs already at version 21 or later are skipped. Output is written to `SecureBoot_HWUpgrade_<timestamp>.csv`.
+
+Once the upgrade is verified stable, remove the `Pre-HWUpgrade*` snapshots:
+
+```powershell
+# Remove all Pre-HWUpgrade* snapshots
+.\FixSecureBootBulk.ps1 -CleanupHWSnapshots
+
+# Remove Pre-HWUpgrade* snapshots for specific VMs
+.\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -CleanupHWSnapshots
+```
+
+Output is written to `SecureBoot_HWSnapshotCleanup_<timestamp>.csv`.
+
+### Combined with remediation
+
+When `-UpgradeHardware` is used alongside `-GuestCredential`, the hardware upgrade is inserted as step 2b between power off and NVRAM rename in the main remediation sequence. The snapshot taken at step 1 covers the hardware upgrade as well, so no additional snapshot is needed. This handles everything in a single run.
+
+```powershell
+.\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -UpgradeHardware
+```
 
 ---
 
