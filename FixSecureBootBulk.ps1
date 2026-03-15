@@ -3,11 +3,14 @@
     Bulk Secure Boot 2023 certificate remediation for VMware VMs on ESXi 8.
     Optionally takes a snapshot before making any changes. Includes rollback,
     snapshot cleanup, and NVRAM cleanup modes for post-validation housekeeping.
+    Includes a read-only assessment mode (-Assess) and hardware version upgrade
+    mode (-UpgradeHardware).
 
     Process per VM (default):
     0. BitLocker safety check
     1. Take snapshot (skipped with -NoSnapshot)
     2. Power off
+    2b. Upgrade hardware version (only if -UpgradeHardware specified)
     3. Rename .nvram -> .nvram_old (ESXi regenerates with 2023 KEK on next boot)
     4. Power on, wait for Tools, verify 2023 certs in new NVRAM
     5. Clear any stale Servicing registry state
@@ -40,6 +43,11 @@
     path - the -Rollback mode will still restore the .nvram_old file if one
     exists, but cannot revert VM state (registry changes etc.).
 
+.PARAMETER Confirm
+    Suppress the "Continue? (Y/N)" prompt and proceed automatically. Use this
+    when running the script unattended or in a scheduled task, and you have
+    already verified sufficient datastore space for snapshots.
+
 .PARAMETER RetainSnapshots
     Keep snapshots even on success. Use this when you want to validate VMs
     over a period of days before removing snapshots. Use -CleanupSnapshots
@@ -51,6 +59,12 @@
     validation period to reclaim datastore space.
     Always run -CleanupSnapshots BEFORE -CleanupNvram - the snapshot is your
     rollback path.
+
+.PARAMETER CleanupHWSnapshots
+    Hardware upgrade snapshot cleanup mode. Finds and removes all
+    Pre-HWUpgrade* snapshots created by standalone -UpgradeHardware runs.
+    Does not require -GuestCredential. Run this after verifying the hardware
+    version upgrade is stable and no rollback is needed.
 
 .PARAMETER CleanupNvram
     NVRAM cleanup mode. Finds and deletes all .nvram_old files left on target
@@ -104,6 +118,33 @@
     configuration unchanged. If your vCenter has a properly signed certificate
     this flag is not needed and should not be used.
 
+.PARAMETER Assess
+    Read-only assessment mode. No changes are made to any VM. Collects current
+    state for all target VMs and outputs a CSV and console summary identifying
+    which VMs need remediation and what steps are required. Includes hardware
+    version, ESXi host version, firmware type, Secure Boot state, KEK/DB/PK
+    certificate status, registry deployment status, event log signals, BitLocker
+    state, and snapshot/nvram_old presence.
+    If -GuestCredential is provided, guest-level data (cert status, registry,
+    events, BitLocker) is collected from powered-on VMs with Tools running.
+    If -GuestCredential is omitted, only hypervisor-level data is collected.
+    No VMs are powered on or off. Mutually exclusive with all action modes.
+
+.PARAMETER UpgradeHardware
+    Upgrades VM hardware version to the latest version supported by the host.
+    Hardware version 21 or later is required for ESXi to populate regenerated
+    NVRAM with the 2023 KEK certificate.
+    Standalone use (-UpgradeHardware only, no -GuestCredential): powers off
+    each VM, takes a snapshot by default for rollback purposes, upgrades
+    hardware version, powers back on. Use -NoSnapshot to skip the snapshot.
+    Combined use (-UpgradeHardware with -GuestCredential): hardware upgrade is
+    performed between step 2 (power off) and step 3 (NVRAM rename) as part of
+    the full remediation sequence; the snapshot taken at step 1 serves as the
+    rollback point. VMs already at version 21 or later are skipped automatically.
+    NOTE: VMware does not provide a supported API or UI method to downgrade VM
+    hardware versions. A snapshot is the only supported rollback path. Reverting
+    to the pre-upgrade snapshot restores the previous hardware version.
+
 .EXAMPLE
     # Run fix on a single VM, remove snapshot on success
     .\FixSecureBootBulk.ps1 -VMName "vm01" -GuestCredential $cred
@@ -141,6 +182,12 @@
     # Feed a previous run's output CSV back in to clean up NVRAM for that batch
     .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" -CleanupNvram
 
+    # Remove Pre-HWUpgrade* snapshots after verifying hardware upgrade is stable
+    .\FixSecureBootBulk.ps1 -CleanupHWSnapshots
+
+    # Remove Pre-HWUpgrade* snapshots for specific VMs
+    .\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -CleanupHWSnapshots
+
     # Full remediation including PK enrollment (recommended - download WindowsOEMDevicesPK.der first)
     .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der"
@@ -149,6 +196,29 @@
     .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
         -BitLockerBackupShare "\\fileserver\BitLockerKeys"
+
+    # Assess all VMs - hypervisor-level data only (no guest credentials needed)
+    .\FixSecureBootBulk.ps1 -Assess
+
+    # Assess all VMs - full data including guest cert and registry status
+    .\FixSecureBootBulk.ps1 -Assess -GuestCredential $cred
+
+    # Assess specific VMs
+    .\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -Assess -GuestCredential $cred
+
+    # Upgrade hardware version only (snapshot taken by default for rollback)
+    .\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -UpgradeHardware
+
+    # Upgrade hardware version without taking a snapshot
+    .\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -UpgradeHardware -NoSnapshot
+
+    # Run unattended without the datastore space confirmation prompt
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -Confirm
+
+    # Full remediation including hardware version upgrade
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -UpgradeHardware
 
 .NOTES
     Do not include domain controllers in automated runs - handle DCs manually.
@@ -170,15 +240,19 @@ param(
     [string]$VMListCsv,
     [PSCredential]$GuestCredential,
     [switch]$NoSnapshot,
+    [switch]$Confirm,
     [switch]$RetainSnapshots,
     [switch]$CleanupSnapshots,
+    [switch]$CleanupHWSnapshots,
     [switch]$CleanupNvram,
     [switch]$Rollback,
     [string]$BitLockerBackupShare,
     [string]$PKDerPath,
     [string]$KEKDerPath,
     [int]$WaitSeconds = 90,
-    [switch]$IgnoreCertificateWarnings
+    [switch]$IgnoreCertificateWarnings,
+    [switch]$Assess,
+    [switch]$UpgradeHardware
 )
 
 # =============================================================================
@@ -189,9 +263,17 @@ if ($NoSnapshot -and $RetainSnapshots) {
     return
 }
 
-$modeSwitches = @($CleanupSnapshots, $CleanupNvram, $Rollback) | Where-Object { $_ }
+$modeSwitches = @($CleanupSnapshots, $CleanupHWSnapshots, $CleanupNvram, $Rollback, $Assess) | Where-Object { $_ }
 if ($modeSwitches.Count -gt 1) {
-    Write-Error "-CleanupSnapshots, -CleanupNvram, and -Rollback are mutually exclusive. Specify only one."
+    Write-Error "-CleanupSnapshots, -CleanupHWSnapshots, -CleanupNvram, -Rollback, and -Assess are mutually exclusive. Specify only one."
+    return
+}
+if ($Assess -and ($NoSnapshot -or $RetainSnapshots -or $BitLockerBackupShare -or $PKDerPath -or $KEKDerPath)) {
+    Write-Error "-Assess is read-only and cannot be combined with -NoSnapshot, -RetainSnapshots, -BitLockerBackupShare, -PKDerPath, or -KEKDerPath."
+    return
+}
+if ($UpgradeHardware -and ($CleanupSnapshots -or $CleanupHWSnapshots -or $CleanupNvram -or $Rollback -or $Assess)) {
+    Write-Error "-UpgradeHardware cannot be combined with -CleanupSnapshots, -CleanupHWSnapshots, -CleanupNvram, -Rollback, or -Assess."
     return
 }
 if ($BitLockerBackupShare) {
@@ -233,9 +315,15 @@ if (-not $global:DefaultVIServer) {
     Connect-VIServer -Server "vcenter.yourdomain.com" -Credential (Get-Credential -Message "vCenter credentials")
 }
 
-$isMainMode = -not $CleanupSnapshots -and -not $CleanupNvram -and -not $Rollback
+$isMainMode         = -not $CleanupSnapshots -and -not $CleanupHWSnapshots -and -not $CleanupNvram -and -not $Rollback -and -not $Assess -and -not ($UpgradeHardware -and -not $GuestCredential)
+$isStandaloneUpgrade = $UpgradeHardware -and -not $GuestCredential
 if ($isMainMode -and -not $GuestCredential) {
     $GuestCredential = Get-Credential -Message "Guest OS credentials (domain admin)"
+}
+if ($Assess -and $GuestCredential) {
+    Write-Host "Assess mode: guest-level data will be collected (cert status, registry, events, BitLocker)." -ForegroundColor Cyan
+} elseif ($Assess) {
+    Write-Host "Assess mode: hypervisor-level data only (-GuestCredential not provided)." -ForegroundColor Yellow
 }
 
 $snapshotBaseName = "Pre-SecureBoot-Fix"
@@ -283,6 +371,9 @@ function Resolve-TargetVMs {
     $names = $names | Select-Object -Unique
 
     if ($names.Count -gt 0) {
+        # When specific VM names are provided, look them up directly.
+        # Do not apply OS or Secure Boot filters - the operator has explicitly
+        # named the target VMs and guest info may be stale after a revert or reboot.
         $resolved = foreach ($name in $names) {
             $found = Get-VM -Name $name -ErrorAction SilentlyContinue
             if (-not $found) {
@@ -290,13 +381,13 @@ function Resolve-TargetVMs {
             }
             $found
         }
-        $resolved = $resolved |
-            Where-Object { $_ -and $_.Guest.OSFullName -match "Windows (Server|10|11)" } |
-            Sort-Object -Property Id -Unique
+        $resolved = $resolved | Where-Object { $_ } | Sort-Object -Property Id -Unique
         return $resolved
     }
 
-    # No names specified - return all in-scope Windows Server VMs
+    # No names specified - return all in-scope Windows VMs.
+    # OSFullName filter is only safe here since we are querying all VMs
+    # and need to narrow the scope to Windows guests.
     $all = Get-VM | Where-Object { $_.Guest.OSFullName -match "Windows (Server|10|11)" }
     if ($SecureBootFilter) {
         $all = $all | Where-Object {
@@ -393,6 +484,65 @@ function Wait-DatastoreTask {
     if ($taskView.Info.State -eq "success") { return $true }
     Write-Warning "    Datastore task failed: $($taskView.Info.Error.LocalizedMessage)"
     return $false
+}
+
+# Upgrades VM hardware version to the latest supported by the host.
+# Returns a hashtable: { Upgraded = $true/$false; FromVersion = N; ToVersion = N; Notes = "" }
+function Invoke-VMHardwareUpgrade {
+    param($VMObj)
+    $result = @{ Upgraded = $false; FromVersion = ""; ToVersion = ""; Notes = "" }
+    try {
+        $vmView     = $VMObj | Get-View
+        $currentVer = $vmView.Config.Version  # e.g. "vmx-19"
+        $currentNum = [int]($currentVer -replace 'vmx-', '')
+        $result.FromVersion = $currentNum
+
+        # Get the maximum hardware version supported by the host
+        $vmHost      = Get-VMHost -VM $VMObj -ErrorAction Stop
+        $hostView    = $vmHost | Get-View
+        $maxVerStr   = ($hostView.Capability.SupportedEVCMode |
+            Where-Object { $_ -match 'vmx-' } |
+            ForEach-Object { [int]($_ -replace '.*vmx-(\d+).*','$1') } |
+            Measure-Object -Maximum).Maximum
+        if (-not $maxVerStr) {
+            # Fallback: use Get-VMHostHardware or derive from ESXi version
+            $esxiVer = [version]$vmHost.Version
+            $maxVerStr = switch ($esxiVer.Major) {
+                9 { 22 }
+                8 { 21 }
+                7 { 19 }
+                default { 21 }
+            }
+        }
+        $result.ToVersion = $maxVerStr
+
+        if ($currentNum -ge $maxVerStr) {
+            $result.Notes = "Already at version $currentNum - no upgrade needed."
+            return $result
+        }
+
+        Write-Host "    Upgrading hardware version: $currentNum -> $maxVerStr" -ForegroundColor Gray
+        $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+        $spec.Version = "vmx-$maxVerStr"
+        $task = $vmView.ReconfigVM_Task($spec)
+        $taskView = Get-View $task
+        $elapsed  = 0
+        while ($taskView.Info.State -notin @('success','error') -and $elapsed -lt 60) {
+            Start-Sleep -Seconds 3; $elapsed += 3
+            $taskView = Get-View $task
+        }
+        if ($taskView.Info.State -eq 'success') {
+            Write-Host "    Hardware version upgraded to $maxVerStr." -ForegroundColor Green
+            $result.Upgraded = $true
+        } else {
+            $result.Notes = "Upgrade failed: $($taskView.Info.Error.LocalizedMessage)"
+            Write-Warning "    $($result.Notes)"
+        }
+    } catch {
+        $result.Notes = "Upgrade error: $($_.Exception.Message)"
+        Write-Warning "    $($result.Notes)"
+    }
+    return $result
 }
 
 # Renames the active .nvram file to .nvram_old so ESXi regenerates a fresh
@@ -500,6 +650,59 @@ function Restore-VMNvram {
 # =============================================================================
 # GUEST SCRIPTS
 # =============================================================================
+
+# Assess mode - reads all deployment signals from the guest in a single
+# Invoke-VMScript call: registry status, cert presence, event log, BitLocker.
+$assessGuestScript = @'
+$ErrorActionPreference = 'SilentlyContinue'
+$WarningPreference     = 'SilentlyContinue'
+$ProgressPreference    = 'SilentlyContinue'
+$r = @{}
+
+# Registry
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
+$svcPath = "$regPath\Servicing"
+$r["UEFICA2023Status"]  = Get-ItemPropertyValue -Path $svcPath -Name "UEFICA2023Status" -EA SilentlyContinue
+$r["AvailableUpdates"]  = "0x$("{0:X4}" -f (Get-ItemPropertyValue -Path $regPath -Name "AvailableUpdates" -EA SilentlyContinue))"
+$errVal = Get-ItemPropertyValue -Path $svcPath -Name "UEFICA2023Error" -EA SilentlyContinue
+$r["UEFICA2023ErrorExists"] = ($null -ne $errVal).ToString()
+$r["UEFICA2023ErrorValue"]  = if ($null -ne $errVal) { $errVal } else { "" }
+
+# Cert presence via ASCII scan
+try {
+    $r["KEK_2023"] = ([System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI kek -EA Stop).Bytes) -match "Microsoft Corporation KEK 2K CA 2023").ToString()
+    $r["DB_2023"]  = ([System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI db  -EA Stop).Bytes) -match "Windows UEFI CA 2023").ToString()
+} catch {
+    $r["KEK_2023"] = "CheckFailed"; $r["DB_2023"] = "CheckFailed"
+}
+
+# PK status
+try {
+    $pk = Get-SecureBootUEFI -Name PK -EA Stop
+    if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 44) {
+        $r["PK_Status"] = "Invalid_NULL"
+    } else {
+        $t = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)])
+        $r["PK_Status"] = if     ($t -match "Windows OEM Devices") { "Valid_WindowsOEM" }
+                          elseif ($t -match "Microsoft")            { "Valid_Microsoft"  }
+                          else                                       { "Valid_Other"      }
+    }
+} catch { $r["PK_Status"] = "CheckFailed" }
+
+# Events
+$evts = @{ Evt1808=$false; Evt1801=$false; Evt1802=$false; Evt1803=$false; Evt1800=$false; Evt1795=$false }
+try {
+    $events = Get-WinEvent -FilterHashtable @{ LogName="System"; ProviderName="Microsoft-Windows-TPM-WMI"; Id=@(1795,1800,1801,1802,1803,1808) } -MaxEvents 50 -EA Stop
+    foreach ($e in $events) { $evts["Evt$($e.Id)"] = $true }
+} catch {}
+foreach ($k in $evts.Keys) { $r[$k] = $evts[$k].ToString() }
+
+# BitLocker
+$bl = Get-BitLockerVolume | Where-Object { $_.ProtectionStatus -eq "On" }
+$r["BitLockerActive"] = ($null -ne $bl -and @($bl).Count -gt 0).ToString()
+
+$r | ConvertTo-Json -Compress
+'@
 
 # BitLocker / TPM safety check
 # $ErrorActionPreference = 'SilentlyContinue' suppresses CommandNotFoundException when
@@ -626,70 +829,69 @@ Write-Host "AvailableUpdates after second task run: 0x$("{0:X4}" -f $val)"
 $verifyScript = @'
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
 $svcPath = "$regPath\Servicing"
-$result  = @{}
 
-$result["Servicing_Status"] = Get-ItemPropertyValue -Path $svcPath `
-    -Name "UEFICA2023Status" -EA SilentlyContinue
-$result["AvailableUpdates"] = "0x$("{0:X4}" -f (Get-ItemPropertyValue `
-    -Path $regPath -Name "AvailableUpdates" -EA SilentlyContinue))"
-
-# UEFICA2023Error: exists only when a deployment error is pending.
-# Errors do NOT appear in Event Log - this key is the only indicator.
-$errVal = Get-ItemPropertyValue -Path $svcPath -Name "UEFICA2023Error" -EA SilentlyContinue
-$result["UEFICA2023ErrorExists"] = ($null -ne $errVal).ToString()
-$result["UEFICA2023ErrorValue"]  = if ($null -ne $errVal) { $errVal } else { "" }
-
-try {
-    $result["KEK_2023"] = ([System.Text.Encoding]::ASCII.GetString(
-        (Get-SecureBootUEFI kek -EA Stop).Bytes) -match
-        'Microsoft Corporation KEK 2K CA 2023').ToString()
-    $result["DB_2023"]  = ([System.Text.Encoding]::ASCII.GetString(
-        (Get-SecureBootUEFI db -EA Stop).Bytes) -match
-        'Windows UEFI CA 2023').ToString()
-} catch {
-    $result["KEK_2023"] = "CheckFailed"
-    $result["DB_2023"]  = "CheckFailed"
+$svcStatus = Get-ItemPropertyValue -Path $svcPath -Name "UEFICA2023Status" -EA SilentlyContinue
+$auRaw = Get-ItemPropertyValue -Path $regPath -Name "AvailableUpdates" -EA SilentlyContinue
+if ($null -ne $auRaw) { $auHex = ("0x{0:X4}" -f [int]$auRaw) } else { $auHex = "not found" }
+$errExists = "False"
+$errValue  = ""
+$svcProps = Get-ItemProperty -Path $svcPath -EA SilentlyContinue
+if ($svcProps -and $null -ne $svcProps.UEFICA2023Error) {
+    $errExists = "True"
+    $errValue  = [string]$svcProps.UEFICA2023Error
 }
 
-# Event log - System / Microsoft-Windows-TPM-WMI (KB 5016061)
-# 1808: all certs + boot manager applied to firmware (definitive success)
-# 1801: certs updated but not yet applied to firmware (error - device needs attention)
-# 1802: update blocked by known firmware issue (error - contact OEM)
-# 1803: no PK-signed KEK found (error - PK remediation required)
-# 1800: reboot required before update can proceed (warning)
-# 1795: firmware returned error on variable write (error - contact OEM)
-# Note: 1808 may not fire until an extra reboot after the update task completes.
-# Absence of 1808 does not mean failure - use registry status as primary truth.
-$evtResult = @{
-    Event1808 = $false; Event1801 = $false; Event1802 = $false
-    Event1803 = $false; Event1800 = $false; Event1795 = $false
-}
+$kek = "CheckFailed"
+$db  = "CheckFailed"
 try {
-    $evts = Get-WinEvent -FilterHashtable @{
-        LogName      = "System"
-        ProviderName = "Microsoft-Windows-TPM-WMI"
-        Id           = @(1795,1800,1801,1802,1803,1808)
-    } -MaxEvents 50 -EA Stop | Sort-Object TimeCreated -Descending
+    $kekBytes = (Get-SecureBootUEFI kek -EA Stop).Bytes
+    if ($kekBytes) { $kek = ([System.Text.Encoding]::ASCII.GetString($kekBytes) -match "Microsoft Corporation KEK 2K CA 2023").ToString() }
+} catch {}
+try {
+    $dbBytes = (Get-SecureBootUEFI db -EA Stop).Bytes
+    if ($dbBytes) { $db = ([System.Text.Encoding]::ASCII.GetString($dbBytes) -match "Windows UEFI CA 2023").ToString() }
+} catch {}
+
+$e1808 = "False"; $e1801 = "False"; $e1802 = "False"
+$e1803 = "False"; $e1800 = "False"; $e1795 = "False"
+try {
+    $startTime = [datetime]"VERIFY_START_TIME"
+    $evts = Get-WinEvent -LogName "System" -EA Stop |
+        Where-Object { $_.ProviderName -eq "Microsoft-Windows-TPM-WMI" -and $_.Id -in @(1795,1800,1801,1802,1803,1808) -and $_.TimeCreated -ge $startTime } |
+        Select-Object -First 50
     foreach ($e in $evts) {
-        switch ($e.Id) {
-            1808 { $evtResult.Event1808 = $true }
-            1801 { $evtResult.Event1801 = $true }
-            1802 { $evtResult.Event1802 = $true }
-            1803 { $evtResult.Event1803 = $true }
-            1800 { $evtResult.Event1800 = $true }
-            1795 { $evtResult.Event1795 = $true }
-        }
+        if ($e.Id -eq 1808) { $e1808 = "True" }
+        if ($e.Id -eq 1801) { $e1801 = "True" }
+        if ($e.Id -eq 1802) { $e1802 = "True" }
+        if ($e.Id -eq 1803) { $e1803 = "True" }
+        if ($e.Id -eq 1800) { $e1800 = "True" }
+        if ($e.Id -eq 1795) { $e1795 = "True" }
     }
 } catch {}
-$result["Evt1808"] = $evtResult.Event1808.ToString()
-$result["Evt1801"] = $evtResult.Event1801.ToString()
-$result["Evt1802"] = $evtResult.Event1802.ToString()
-$result["Evt1803"] = $evtResult.Event1803.ToString()
-$result["Evt1800"] = $evtResult.Event1800.ToString()
-$result["Evt1795"] = $evtResult.Event1795.ToString()
 
-$result | ConvertTo-Json -Compress
+Write-Output "VERIFY_START"
+Write-Output "Servicing_Status=$svcStatus"
+Write-Output "AvailableUpdates=$auHex"
+Write-Output "UEFICA2023ErrorExists=$errExists"
+Write-Output "UEFICA2023ErrorValue=$errValue"
+Write-Output "KEK_2023=$kek"
+Write-Output "DB_2023=$db"
+Write-Output "Evt1808=$e1808"
+Write-Output "Evt1801=$e1801"
+Write-Output "Evt1802=$e1802"
+Write-Output "Evt1803=$e1803"
+Write-Output "Evt1800=$e1800"
+Write-Output "Evt1795=$e1795"
+Write-Output "VERIFY_END"
 '@
+
+# Builds a timestamped copy of $verifyScript with the run start time injected.
+# This ensures event log checks only return events from the current run,
+# not events from prior runs or reboots that remain in the System log indefinitely.
+function Get-TimestampedVerifyScript {
+    param([datetime]$StartTime)
+    return $verifyScript -replace 'VERIFY_START_TIME', $StartTime.ToString('yyyy-MM-dd HH:mm:ss')
+}
 
 # Check Platform Key validity in guest (used before PK remediation).
 # PK_Status values:
@@ -823,6 +1025,301 @@ function Get-VMXOption {
 }
 
 # =============================================================================
+# ASSESS MODE
+# Read-only. Collects hypervisor-level data for all target VMs.
+# If -GuestCredential provided, also collects cert/registry/event/BitLocker data
+# via Invoke-VMScript on powered-on VMs with Tools running.
+# No changes are made to any VM.
+# =============================================================================
+if ($Assess) {
+    Write-Host "`n=== ASSESS MODE (READ-ONLY) ===" -ForegroundColor Cyan
+    $vms = Resolve-TargetVMs
+    if (-not $vms) { Write-Warning "No matching VMs found."; return }
+    Write-Host "Assessing $($vms.Count) VM(s)..." -ForegroundColor Cyan
+
+    $assessReport = [System.Collections.Generic.List[PSObject]]::new()
+
+    foreach ($vm in $vms) {
+        $vmName = $vm.Name
+        Write-Host "`n$('='*60)" -ForegroundColor White
+        Write-Host "Assessing: $vmName" -ForegroundColor White
+        Write-Host "$('='*60)" -ForegroundColor White
+
+        $vmView   = $vm | Get-View
+        $vmHost   = Get-VMHost -VM $vm -EA SilentlyContinue
+        $hwVerNum = [int](($vmView.Config.Version) -replace 'vmx-', '')
+        $firmware = $vmView.Config.Firmware
+        $sbEnabled = $vmView.Config.BootOptions.EfiSecureBootEnabled
+
+        # Check for existing nvram_old and snapshot
+        $hasNvramOld = $false
+        $hasSnapshot = $false
+        try {
+            $ctx  = Get-VMDatastoreContext -VMObj $vm
+            $spec = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
+            $spec.MatchPattern = "*.nvram*"
+            $results = $ctx.DsBrowser.SearchDatastoreSubFolders("[$($ctx.DsName)] $($ctx.VmDir)", $spec)
+            if ($results -and $results.File) {
+                $hasNvramOld = ($null -ne ($results.File | Where-Object { $_.Path -match '_old' }))
+            }
+        } catch {}
+        try {
+            $snaps = Get-Snapshot -VM $vm -EA SilentlyContinue
+            $hasSnapshot = ($null -ne ($snaps | Where-Object { $_.Name -match "Pre-SecureBoot-Fix|Pre-HWUpgrade" }))
+        } catch {}
+
+        $row = [PSCustomObject]@{
+            VMName           = $vmName
+            PowerState       = $vm.PowerState
+            HWVersion        = $hwVerNum
+            HWVersionOK      = ($hwVerNum -ge 21)
+            ESXiHost         = if ($vmHost) { $vmHost.Name } else { "" }
+            ESXiVersion      = if ($vmHost) { $vmHost.Version } else { "" }
+            Firmware         = $firmware
+            SecureBoot       = if ($firmware -eq "efi") { $sbEnabled.ToString() } else { "N/A (BIOS)" }
+            NvramOldExists   = $hasNvramOld
+            SnapshotExists   = $hasSnapshot
+            # Guest-level (populated below if credentials provided and VM accessible)
+            KEK_2023         = "Not collected"
+            DB_2023          = "Not collected"
+            PK_Status        = "Not collected"
+            UEFICA2023Status = "Not collected"
+            AvailableUpdates = "Not collected"
+            UEFICA2023Error  = "Not collected"
+            Evt1808          = "Not collected"
+            Evt1801          = "Not collected"
+            Evt1802          = "Not collected"
+            Evt1803          = "Not collected"
+            Evt1800          = "Not collected"
+            Evt1795          = "Not collected"
+            BitLockerActive  = "Not collected"
+            ActionNeeded     = ""
+            Notes            = ""
+        }
+
+        Write-Host "  HW Version : $hwVerNum $(if ($hwVerNum -lt 21) { '(< 21 - KEK may be absent after NVRAM regeneration)' } else { '' })" -ForegroundColor $(if ($hwVerNum -lt 21) { "Yellow" } else { "Green" })
+        Write-Host "  ESXi Host  : $($row.ESXiHost) v$($row.ESXiVersion)"
+        Write-Host "  Firmware   : $firmware | Secure Boot: $($row.SecureBoot)"
+        Write-Host "  Power      : $($vm.PowerState)"
+        Write-Host "  nvram_old  : $hasNvramOld | Snapshot: $hasSnapshot"
+
+        if ($hwVerNum -lt 21) { $row.Notes += "HW version $hwVerNum < 21 - upgrade before remediation. " }
+        if ($firmware -ne "efi") { $row.Notes += "BIOS firmware - not eligible for Secure Boot cert update. " }
+
+        # Guest-level collection
+        if ($GuestCredential -and $vm.PowerState -eq "PoweredOn") {
+            try {
+                $aOut  = Invoke-VMScript -VM $vm -ScriptText $assessGuestScript `
+                    -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+                $aData = $aOut.ScriptOutput.Trim() | ConvertFrom-Json
+
+                $row.KEK_2023         = $aData.KEK_2023
+                $row.DB_2023          = $aData.DB_2023
+                $row.PK_Status        = $aData.PK_Status
+                $row.UEFICA2023Status = if ($aData.UEFICA2023Status) { $aData.UEFICA2023Status } else { "not found" }
+                $row.AvailableUpdates = $aData.AvailableUpdates
+                $row.UEFICA2023Error  = if ($aData.UEFICA2023ErrorExists -eq "True") { "ERROR ($($aData.UEFICA2023ErrorValue))" } else { "" }
+                $row.Evt1808 = $aData.Evt1808; $row.Evt1801 = $aData.Evt1801
+                $row.Evt1802 = $aData.Evt1802; $row.Evt1803 = $aData.Evt1803
+                $row.Evt1800 = $aData.Evt1800; $row.Evt1795 = $aData.Evt1795
+                $row.BitLockerActive = $aData.BitLockerActive
+
+                Write-Host "  UEFICA2023Status : $($row.UEFICA2023Status)" -ForegroundColor $(switch ($row.UEFICA2023Status.ToLower()) { "updated" {"Green"} "in progress" {"Yellow"} default {"Red"} })
+                Write-Host "  AvailableUpdates : $($row.AvailableUpdates)"
+                Write-Host "  KEK 2023 : $($row.KEK_2023) | DB 2023: $($row.DB_2023) | PK: $($row.PK_Status)"
+                Write-Host "  Evt1808  : $($row.Evt1808) | Evt1801: $($row.Evt1801) | Evt1795: $($row.Evt1795)"
+                if ($row.UEFICA2023Error) { Write-Host "  RegError : $($row.UEFICA2023Error)" -ForegroundColor Red }
+                if ($aData.BitLockerActive -eq "True") { $row.Notes += "BitLocker active. " }
+            } catch {
+                $row.Notes += "Guest data collection failed: $($_.Exception.Message) "
+                Write-Warning "  Guest collection failed: $($_.Exception.Message)"
+            }
+        } elseif ($GuestCredential -and $vm.PowerState -ne "PoweredOn") {
+            $row.Notes += "VM powered off - guest data not collected. "
+            Write-Host "  Guest data: skipped (VM powered off)" -ForegroundColor Gray
+        } else {
+            Write-Host "  Guest data: skipped (no -GuestCredential)" -ForegroundColor Gray
+        }
+
+        # Derive ActionNeeded summary
+        $actions = [System.Collections.Generic.List[string]]::new()
+        if ($firmware -ne "efi")                               { $actions.Add("N/A - BIOS") }
+        elseif ($sbEnabled -eq $false)                         { $actions.Add("Enable Secure Boot") }
+        else {
+            if ($hwVerNum -lt 21)                              { $actions.Add("Upgrade HW version") }
+            if ($row.UEFICA2023Status -notin @("updated","Not collected")) {
+                if ($row.KEK_2023 -eq "False" -or $row.DB_2023 -eq "False") { $actions.Add("Rename NVRAM + run cert update") }
+                elseif ($row.UEFICA2023Status -eq "not found")               { $actions.Add("Trigger cert update task") }
+                elseif ($row.UEFICA2023Status -eq "in progress")             { $actions.Add("Reboot + trigger task again") }
+            }
+            if ($row.PK_Status -in @("Valid_Other","Invalid_NULL"))          { $actions.Add("Enroll PK") }
+            if ($row.UEFICA2023Error)                                         { $actions.Add("Investigate reg error") }
+            if ($row.Evt1802 -eq "True")                                      { $actions.Add("OEM firmware update (Evt 1802)") }
+            if ($row.Evt1795 -eq "True")                                      { $actions.Add("OEM firmware update (Evt 1795)") }
+            if ($actions.Count -eq 0 -and $row.UEFICA2023Status -eq "updated") { $actions.Add("None - complete") }
+            elseif ($actions.Count -eq 0 -and $row.UEFICA2023Status -eq "Not collected") { $actions.Add("Run with -GuestCredential for full assessment") }
+        }
+        $row.ActionNeeded = $actions -join " | "
+        Write-Host "  Action     : $($row.ActionNeeded)" -ForegroundColor $(if ($row.ActionNeeded -eq "None - complete") { "Green" } else { "Yellow" })
+
+        $assessReport.Add($row)
+    }
+
+    Write-Host "`n$('='*60)" -ForegroundColor White
+    Write-Host "ASSESS SUMMARY" -ForegroundColor White
+    Write-Host "$('='*60)" -ForegroundColor White
+    $assessReport | Format-Table VMName, PowerState, HWVersion, HWVersionOK, ESXiVersion,
+        SecureBoot, KEK_2023, DB_2023, PK_Status, UEFICA2023Status,
+        UEFICA2023Error, Evt1808, BitLockerActive, ActionNeeded -AutoSize
+
+    $csvPath = ".\SecureBoot_Assess_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+    $assessReport | Export-Csv -Path $csvPath -NoTypeInformation
+    Write-Host "Exported to: $csvPath" -ForegroundColor Green
+
+    $needHW      = ($assessReport | Where-Object { $_.HWVersionOK -eq $false -and $_.Firmware -eq "efi" }).Count
+    $needPK      = ($assessReport | Where-Object { $_.PK_Status -in @("Valid_Other","Invalid_NULL") }).Count
+    $notDone     = ($assessReport | Where-Object { $_.UEFICA2023Status -notin @("updated","Not collected") }).Count
+    $complete    = ($assessReport | Where-Object { $_.UEFICA2023Status -eq "updated" -and $_.PK_Status -in @("Valid_WindowsOEM","Valid_Microsoft","Not collected") }).Count
+    $regErrors   = ($assessReport | Where-Object { $_.UEFICA2023Error -ne "" -and $_.UEFICA2023Error -ne "Not collected" }).Count
+    Write-Host ""
+    Write-Host "Complete (Updated + valid PK) : $complete / $($assessReport.Count)" -ForegroundColor Green
+    if ($needHW     -gt 0) { Write-Host "Need HW upgrade (< v21)       : $needHW"    -ForegroundColor Yellow }
+    if ($needPK     -gt 0) { Write-Host "Need PK enrollment             : $needPK"   -ForegroundColor Yellow }
+    if ($notDone    -gt 0) { Write-Host "Cert update not complete       : $notDone"  -ForegroundColor Yellow }
+    if ($regErrors  -gt 0) { Write-Host "Registry errors                : $regErrors" -ForegroundColor Red   }
+    return
+}
+
+# =============================================================================
+# STANDALONE HARDWARE UPGRADE MODE
+# Upgrades hardware version on target VMs without running cert remediation.
+# Powers each VM off, upgrades, powers back on. Does not require GuestCredential.
+# =============================================================================
+if ($isStandaloneUpgrade) {
+    Write-Host "`n=== HARDWARE UPGRADE MODE ===" -ForegroundColor Cyan
+    $vms = Resolve-TargetVMs
+    if (-not $vms) { Write-Warning "No matching VMs found."; return }
+    Write-Host "Targeting $($vms.Count) VM(s) for hardware version upgrade..." -ForegroundColor Cyan
+
+    # Rollback warning - no supported API/UI path to downgrade hardware version.
+    # A snapshot is the only supported rollback method. Taken by default unless
+    # -NoSnapshot is specified.
+    Write-Host ""
+    Write-Warning "VMware does not provide a supported method to downgrade VM hardware versions."
+    Write-Warning "A snapshot taken before the upgrade is the only supported rollback path."
+    if ($NoSnapshot) {
+        Write-Warning "-NoSnapshot specified: no snapshot will be taken. There will be no automated rollback path if issues arise."
+    } else {
+        Write-Host "Snapshots will be taken before each upgrade. Revert via vSphere Client or -Rollback if needed." -ForegroundColor Cyan
+    }
+    Write-Host ""
+
+    $hwSnapName = "Pre-HWUpgrade_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+
+    $hwReport = [System.Collections.Generic.List[PSObject]]::new()
+    foreach ($vm in $vms) {
+        $vmName   = $vm.Name
+        $vmView   = $vm | Get-View
+        $hwVerNum = [int](($vmView.Config.Version) -replace 'vmx-', '')
+        Write-Host "`nProcessing: $vmName (current HW version: $hwVerNum)" -ForegroundColor White
+
+        $hwRow = [PSCustomObject]@{
+            VMName          = $vmName
+            FromVersion     = $hwVerNum
+            ToVersion       = ""
+            SnapshotCreated = $false
+            SnapshotName    = ""
+            Upgraded        = $false
+            Result          = ""
+            Notes           = ""
+        }
+
+        if ($hwVerNum -ge 21) {
+            Write-Host "  Already at version $hwVerNum (>= 21) - skipping." -ForegroundColor Green
+            $hwRow.ToVersion = $hwVerNum
+            $hwRow.Result    = "Skipped - already >= 21"
+            $hwReport.Add($hwRow); continue
+        }
+
+        try {
+            $wasPoweredOn = ($vm.PowerState -eq "PoweredOn")
+
+            # Take snapshot before any changes (VM must be powered on for snapshot,
+            # so snap before power off)
+            if (-not $NoSnapshot) {
+                if ($vm.PowerState -eq "PoweredOn") {
+                    Write-Host "  Taking snapshot '$hwSnapName'..." -ForegroundColor Cyan
+                    $snapOk = New-VMSnapshotSafe -VMObj $vm -Name $hwSnapName `
+                        -Description "Pre-hardware-version-upgrade snapshot - rollback by reverting this snapshot"
+                    $hwRow.SnapshotCreated = $snapOk
+                    $hwRow.SnapshotName   = if ($snapOk) { $hwSnapName } else { "" }
+                    if (-not $snapOk) {
+                        $hwRow.Notes += "Snapshot failed - proceeding without rollback point. "
+                        Write-Warning "  Snapshot failed - proceeding without rollback point."
+                    }
+                } else {
+                    # VM is already powered off - snapshot a powered-off VM
+                    Write-Host "  Taking snapshot of powered-off VM '$hwSnapName'..." -ForegroundColor Cyan
+                    $snapOk = New-VMSnapshotSafe -VMObj $vm -Name $hwSnapName `
+                        -Description "Pre-hardware-version-upgrade snapshot - rollback by reverting this snapshot"
+                    $hwRow.SnapshotCreated = $snapOk
+                    $hwRow.SnapshotName   = if ($snapOk) { $hwSnapName } else { "" }
+                    if (-not $snapOk) {
+                        $hwRow.Notes += "Snapshot failed - proceeding without rollback point. "
+                        Write-Warning "  Snapshot failed - proceeding without rollback point."
+                    }
+                }
+            }
+
+            if ($wasPoweredOn) {
+                Write-Host "  Powering off..." -ForegroundColor Cyan
+                Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
+                Start-Sleep -Seconds 10
+            }
+
+            $upResult = Invoke-VMHardwareUpgrade -VMObj $vm
+            $hwRow.ToVersion = $upResult.ToVersion
+            $hwRow.Upgraded  = $upResult.Upgraded
+            if ($upResult.Notes) { $hwRow.Notes += $upResult.Notes }
+
+            if ($upResult.Upgraded) {
+                if ($wasPoweredOn) {
+                    Write-Host "  Powering on..." -ForegroundColor Cyan
+                    Start-VM -VM $vm | Out-Null
+                }
+                $hwRow.Result = "Upgraded $($upResult.FromVersion) -> $($upResult.ToVersion)"
+                if ($hwRow.SnapshotCreated) {
+                    Write-Host "  Snapshot '$hwSnapName' retained for rollback. Remove when satisfied." -ForegroundColor Yellow
+                }
+            } else {
+                if ($wasPoweredOn) { Start-VM -VM $vm | Out-Null }
+                $hwRow.Result = "FAILED"
+            }
+        } catch {
+            $hwRow.Result = "ERROR"
+            $hwRow.Notes += $_.Exception.Message
+            Write-Warning "  Error: $($_.Exception.Message)"
+        }
+        $hwReport.Add($hwRow)
+    }
+
+    Write-Host "`n=== HARDWARE UPGRADE SUMMARY ===" -ForegroundColor White
+    $hwReport | Format-Table VMName, FromVersion, ToVersion, SnapshotCreated, Upgraded, Result, Notes -AutoSize
+    $csvPath = ".\SecureBoot_HWUpgrade_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+    $hwReport | Export-Csv -Path $csvPath -NoTypeInformation
+    Write-Host "Exported to: $csvPath" -ForegroundColor Green
+    $upgraded  = ($hwReport | Where-Object { $_.Upgraded }).Count
+    $skipped   = ($hwReport | Where-Object { $_.Result -like "Skipped*" }).Count
+    $failed    = ($hwReport | Where-Object { $_.Result -in @("FAILED","ERROR") }).Count
+    $snapped   = ($hwReport | Where-Object { $_.SnapshotCreated }).Count
+    Write-Host "Upgraded: $upgraded | Skipped (already OK): $skipped | Failed: $failed | Snapshots taken: $snapped"
+    if ($snapped -gt 0) {
+        Write-Host "Remove snapshots via vSphere Client or -CleanupHWSnapshots once upgrade is verified." -ForegroundColor Yellow
+    }
+    return
+}
+
+# =============================================================================
 # SNAPSHOT CLEANUP MODE
 # Finds and removes all Pre-SecureBoot-Fix* snapshots on target VMs.
 # Run after validation period. Always run before -CleanupNvram.
@@ -898,6 +1395,87 @@ if ($CleanupSnapshots) {
     }
 
     $csvPath = ".\SecureBoot_SnapshotCleanup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+    $cleanupReport | Export-Csv -Path $csvPath -NoTypeInformation
+    Write-Host "Exported to: $csvPath" -ForegroundColor Green
+    return
+}
+
+# =============================================================================
+# HW UPGRADE SNAPSHOT CLEANUP MODE
+# Finds and removes all Pre-HWUpgrade* snapshots created by -UpgradeHardware.
+# Run after verifying the hardware version upgrade is stable.
+# =============================================================================
+if ($CleanupHWSnapshots) {
+    Write-Host "`n=== HW UPGRADE SNAPSHOT CLEANUP MODE ===" -ForegroundColor Cyan
+    Write-Host "Searching for 'Pre-HWUpgrade*' snapshots..." -ForegroundColor Cyan
+
+    $vms = Resolve-TargetVMs
+    if (-not $vms) { Write-Warning "No matching VMs found."; return }
+
+    $snapsToRemove = [System.Collections.Generic.List[PSObject]]::new()
+    foreach ($vm in $vms) {
+        $snaps = Get-Snapshot -VM $vm -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -like "Pre-HWUpgrade*" }
+        foreach ($snap in $snaps) {
+            $snapsToRemove.Add([PSCustomObject]@{
+                VMName   = $vm.Name
+                SnapName = $snap.Name
+                Created  = $snap.Created
+                SizeMB   = [math]::Round($snap.SizeMB, 1)
+                Snapshot = $snap
+            })
+        }
+    }
+
+    if ($snapsToRemove.Count -eq 0) {
+        Write-Host "No Pre-HWUpgrade* snapshots found on target VMs." -ForegroundColor Green
+        return
+    }
+
+    Write-Host "`nSnapshots to be removed:" -ForegroundColor Yellow
+    $snapsToRemove | Format-Table VMName, SnapName, Created,
+        @{N="Size(MB)"; E={$_.SizeMB}} -AutoSize
+
+    $totalSizeMB = ($snapsToRemove | Measure-Object -Property SizeMB -Sum).Sum
+    Write-Host "Total snapshots : $($snapsToRemove.Count)"
+    Write-Host "Space reclaimed : $([math]::Round($totalSizeMB / 1024, 2)) GB" -ForegroundColor Yellow
+
+    $confirm = Read-Host "`nProceed with removal? (Y/N)"
+    if ($confirm -notmatch '^[Yy]') { Write-Host "Aborted."; return }
+
+    $cleanupReport = [System.Collections.Generic.List[PSObject]]::new()
+    foreach ($item in $snapsToRemove) {
+        Write-Host "  Removing snapshot on $($item.VMName)..." -ForegroundColor Cyan
+        $resultRow = [PSCustomObject]@{
+            VMName   = $item.VMName
+            SnapName = $item.SnapName
+            SizeMB   = $item.SizeMB
+            Result   = "Pending"
+            Notes    = ""
+        }
+        try {
+            Remove-Snapshot -Snapshot $item.Snapshot -Confirm:$false -ErrorAction Stop | Out-Null
+            Write-Host "    Removed: $($item.SnapName)" -ForegroundColor Green
+            $resultRow.Result = "Removed"
+        } catch {
+            Write-Warning "    Failed on $($item.VMName): $($_.Exception.Message)"
+            $resultRow.Result = "Failed"
+            $resultRow.Notes  = $_.Exception.Message
+        }
+        $cleanupReport.Add($resultRow)
+    }
+
+    Write-Host "`n=== HW SNAPSHOT CLEANUP SUMMARY ===" -ForegroundColor White
+    $cleanupReport | Format-Table VMName, SnapName, SizeMB, Result, Notes -AutoSize
+
+    $removed = ($cleanupReport | Where-Object { $_.Result -eq "Removed" }).Count
+    $failed  = ($cleanupReport | Where-Object { $_.Result -eq "Failed"  }).Count
+    Write-Host "Removed : $removed" -ForegroundColor Green
+    if ($failed -gt 0) {
+        Write-Host "Failed  : $failed (remove manually via vSphere client)" -ForegroundColor Red
+    }
+
+    $csvPath = ".\SecureBoot_HWSnapshotCleanup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
     $cleanupReport | Export-Csv -Path $csvPath -NoTypeInformation
     Write-Host "Exported to: $csvPath" -ForegroundColor Green
     return
@@ -1176,8 +1754,12 @@ if ($NoSnapshot) {
     Write-Host "`nEnsure sufficient datastore space for $($vms.Count) snapshot(s) before proceeding." -ForegroundColor Yellow
 }
 
-$confirm = Read-Host "Continue? (Y/N)"
-if ($confirm -notmatch '^[Yy]') { Write-Host "Aborted."; return }
+if ($Confirm) {
+    Write-Host "Continue? (Y/N): y (auto-confirmed via -Confirm)" -ForegroundColor Gray
+} else {
+    $confirmInput = Read-Host "Continue? (Y/N)"
+    if ($confirmInput -notmatch '^[Yy]') { Write-Host "Aborted."; return }
+}
 
 $report = [System.Collections.Generic.List[PSObject]]::new()
 
@@ -1246,6 +1828,9 @@ function Backup-BitLockerKeys {
 foreach ($vm in $vms) {
     $vmName      = $vm.Name
     $snapCreated = $false
+    # Capture timestamp before any changes so event log checks only consider
+    # events generated during this run, not from prior runs or reboots.
+    $vmRunStart  = (Get-Date).AddSeconds(-5)  # 5s buffer for clock skew
 
     Write-Host "`n$('='*60)" -ForegroundColor White
     Write-Host "Processing: $vmName" -ForegroundColor White
@@ -1260,6 +1845,7 @@ foreach ($vm in $vms) {
         NVRAMRenamed        = $false
         KEK_AfterNVRAM      = "Not checked"
         DB_AfterNVRAM       = "Not checked"
+        HWUpgraded          = "N/A"
         UpdateTriggered     = $false
         KEK_2023            = "Not checked"
         DB_2023             = "Not checked"
@@ -1361,12 +1947,107 @@ foreach ($vm in $vms) {
         }
 
         # ------------------------------------------------------------------
-        # Step 2 - Power off
+        # Pre-check - assess current VM state to determine which steps can
+        # be skipped. Only runs if VM is powered on and GuestCredential is
+        # available. Sets $entryStep to control step gating below.
+        #
+        # entryStep values:
+        #   "full"       - run all steps (default; NVRAM stale or unknown)
+        #   "skipNvram"  - skip steps 2/2b/3/4 (KEK already present in NVRAM)
+        #   "skipToStep6"- skip steps 2/2b/3/4/5 (0x4100, need reboot only)
+        #   "certDone"   - skip to step 8 (cert update complete, PK check only)
+        #   "allDone"    - VM fully remediated, skip entirely
         # ------------------------------------------------------------------
+        $entryStep = "full"
+        if ($vm.PowerState -eq "PoweredOn") {
+            Write-Host "  [Pre] Assessing current state to determine required steps..." -ForegroundColor Cyan
+            try {
+                $preOut  = Invoke-VMScript -VM $vm -ScriptText $assessGuestScript `
+                    -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+                $preJson = ($preOut.ScriptOutput -split "`r?`n" |
+                    Where-Object { $_.Trim() -match '^{' } | Select-Object -Last 1).Trim()
+                if ($preJson) {
+                    $pre = $preJson | ConvertFrom-Json
+
+                    $certsDone = ($pre.UEFICA2023Status -eq "updated" -or $pre.AvailableUpdates -eq "0x4000")
+                    $nvramGood = ($pre.KEK_2023 -eq "True" -and $pre.DB_2023 -eq "True")
+                    $halfwayThere = ($nvramGood -and $pre.AvailableUpdates -eq "0x4100")
+                    $pkGoodAlready = ($pre.PK_Status -in @("Valid_WindowsOEM","Valid_Microsoft"))
+
+                    if ($certsDone -and ($pkGoodAlready -or -not $PKDerPath)) {
+                        $entryStep = "allDone"
+                        Write-Host "  [Pre] Already complete - skipping VM." -ForegroundColor Green
+                        $row.FinalStatus    = "Updated"
+                        $row.KEK_2023       = $pre.KEK_2023
+                        $row.DB_2023        = $pre.DB_2023
+                        $row.PK_Status      = $pre.PK_Status
+                        $row.Evt1808        = $pre.Evt1808
+                        $row.Notes         += "Pre-check: already complete - no changes made. "
+                        $report.Add($row)
+                        continue
+                    } elseif ($certsDone) {
+                        $entryStep = "certDone"
+                        Write-Host "  [Pre] Cert update already complete - skipping to PK check (step 8)." -ForegroundColor Green
+                        $row.KEK_2023    = $pre.KEK_2023
+                        $row.DB_2023     = $pre.DB_2023
+                        $row.FinalStatus = "Updated"
+                        $row.Evt1808     = $pre.Evt1808
+                        $row.Notes      += "Pre-check: cert update already complete - skipped steps 2-7. "
+                    } elseif ($halfwayThere) {
+                        $entryStep = "skipToStep6"
+                        Write-Host "  [Pre] AvailableUpdates=0x4100 - KEK/DB applied, Boot Manager pending. Skipping to step 6 (reboot)." -ForegroundColor Yellow
+                        $row.KEK_AfterNVRAM = "True"
+                        $row.DB_AfterNVRAM  = "True"
+                        $row.Notes         += "Pre-check: AvailableUpdates=0x4100 - skipped steps 2-5. "
+                    } elseif ($nvramGood) {
+                        $entryStep = "skipNvram"
+                        Write-Host "  [Pre] KEK 2023 already present in NVRAM - skipping power off/rename/power on (steps 2-4)." -ForegroundColor Yellow
+                        $row.KEK_AfterNVRAM = "True"
+                        $row.DB_AfterNVRAM  = "True"
+                        $row.Notes         += "Pre-check: KEK 2023 already in NVRAM - skipped steps 2-4. "
+                    } else {
+                        Write-Host "  [Pre] KEK 2023 not present - full NVRAM regeneration required." -ForegroundColor Yellow
+                    }
+                }
+            } catch {
+                Write-Host "  [Pre] Pre-check failed ($($_.Exception.Message)) - running full sequence." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  [Pre] VM is powered off - running full sequence." -ForegroundColor Yellow
+        }
+
+        # ------------------------------------------------------------------
+        # Step 2 - Power off (skipped if NVRAM already has 2023 certs)
+        # ------------------------------------------------------------------
+        if ($entryStep -notin @("skipNvram","skipToStep6","certDone")) {
         Write-Host "  [2/9] Powering off..." -ForegroundColor Cyan
         if ($vm.PowerState -eq "PoweredOn") {
             Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
             Start-Sleep -Seconds 10
+        }
+
+        # ------------------------------------------------------------------
+        # Step 2b - Upgrade hardware version (only if -UpgradeHardware specified)
+        # VM must be powered off. VMs already at version 21+ are skipped.
+        # ------------------------------------------------------------------
+        if ($UpgradeHardware) {
+            $vmView   = $vm | Get-View
+            $hwVerNum = [int](($vmView.Config.Version) -replace 'vmx-', '')
+            if ($hwVerNum -lt 21) {
+                Write-Host "  [2b/9] Upgrading hardware version (current: $hwVerNum)..." -ForegroundColor Cyan
+                $upResult = Invoke-VMHardwareUpgrade -VMObj $vm
+                if ($upResult.Upgraded) {
+                    $row.HWUpgraded = "$hwVerNum -> $($upResult.ToVersion)"
+                    $vm = Get-VM -Name $vmName
+                } else {
+                    $row.HWUpgraded = "FAILED"
+                    $row.Notes += "Hardware upgrade failed: $($upResult.Notes) "
+                    Write-Warning "  Hardware upgrade failed - continuing with existing version $hwVerNum."
+                }
+            } else {
+                Write-Host "  [2b/9] Hardware version $hwVerNum >= 21 - no upgrade needed." -ForegroundColor Green
+                $row.HWUpgraded = "Already OK ($hwVerNum)"
+            }
         }
 
         # ------------------------------------------------------------------
@@ -1409,18 +2090,25 @@ foreach ($vm in $vms) {
             $row.Notes += "NVRAM cert verify failed. "
         }
 
+        } # end skip-NVRAM gate (steps 2-4)
+
         # ------------------------------------------------------------------
         # Step 5 - Clear stale registry state, set AvailableUpdates, trigger task
+        # (skipped if cert update already complete or only reboot needed)
         # ------------------------------------------------------------------
+        if ($entryStep -notin @("skipToStep6","certDone")) {
         Write-Host "  [5/9] Clearing stale state and triggering update..." -ForegroundColor Cyan
         $updateOut = Invoke-VMScript -VM $vm -ScriptText $updateScript `
             -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
         Write-Host $updateOut.ScriptOutput -ForegroundColor Gray
         $row.UpdateTriggered = $true
 
+        } # end skip-cert-update gate (step 5)
+
         # ------------------------------------------------------------------
-        # Step 6 - Reboot, trigger task again
+        # Step 6 - Reboot, trigger task again (skipped if cert update complete)
         # ------------------------------------------------------------------
+        if ($entryStep -ne "certDone") {
         Write-Host "  [6/9] Rebooting..." -ForegroundColor Cyan
         Restart-VMGuest -VM $vm -Confirm:$false | Out-Null
         Start-Sleep -Seconds $WaitSeconds
@@ -1436,17 +2124,47 @@ foreach ($vm in $vms) {
             -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
         Write-Host $taskOut.ScriptOutput -ForegroundColor Gray
 
+        } # end cert-done gate (step 6)
+
         # ------------------------------------------------------------------
         # Step 7 - Final verification (KEK/DB cert status)
         # ------------------------------------------------------------------
         Write-Host "  [7/9] Verifying final KEK/DB cert status..." -ForegroundColor Cyan
-        $verifyOut  = Invoke-VMScript -VM $vm -ScriptText $verifyScript `
+
+        $verifyOut  = Invoke-VMScript -VM $vm -ScriptText (Get-TimestampedVerifyScript -StartTime $vmRunStart) `
             -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
-        $verifyData = $verifyOut.ScriptOutput.Trim() | ConvertFrom-Json
+
+        $verifyData = $null
+        try {
+            $lines = $verifyOut.ScriptOutput -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            if ($lines -contains "VERIFY_START" -and $lines -contains "VERIFY_END") {
+                $map = @{}
+                foreach ($line in $lines) {
+                    if ($line -match '^([^=]+)=(.*)$') { $map[$Matches[1]] = $Matches[2] }
+                }
+                $verifyData = [PSCustomObject]$map
+            }
+        } catch {}
+
+        if ($null -eq $verifyData) {
+            Write-Warning "  Verify script returned no parseable output - skipping VM."
+            Write-Warning "  Raw output: $($verifyOut.ScriptOutput.Trim())"
+            Write-Warning "  ExitCode: $($verifyOut.ExitCode) | ScriptError: $($verifyOut.ScriptError)"
+            $row.Notes += "Verify script returned no output - check VM manually. "
+            $report.Add($row)
+            continue
+        }
 
         $row.KEK_2023    = $verifyData.KEK_2023
         $row.DB_2023     = $verifyData.DB_2023
-        $row.FinalStatus = $verifyData.Servicing_Status
+        # \Servicing may be absent on fully-complete VMs; fall back to AvailableUpdates = 0x4000
+        $row.FinalStatus = if ($verifyData.Servicing_Status) {
+            $verifyData.Servicing_Status
+        } elseif ($verifyData.AvailableUpdates -eq "0x4000") {
+            "Updated"
+        } else {
+            "Unknown"
+        }
 
         if ($verifyData.UEFICA2023ErrorExists -eq "True") {
             $row.UEFICA2023Error = "ERROR ($($verifyData.UEFICA2023ErrorValue))"
@@ -1461,11 +2179,9 @@ foreach ($vm in $vms) {
         $row.Evt1800 = $verifyData.Evt1800
         $row.Evt1795 = $verifyData.Evt1795
 
-        # Flag error events in Notes. 1808 absence is not flagged - it may not
-        # fire until an extra reboot after the task completes (confirmed in testing).
-        if ($verifyData.Evt1801 -eq "True") {
-            $row.Notes += "Event 1801: certs updated but not yet applied to firmware - an additional reboot may be required. "
-        }
+        # Flag persistent error events in Notes. 1801 and 1800 are handled by
+        # step 7b which reboots and re-checks before adding a Note.
+        # 1808 absence is not flagged - may not fire until after an extra reboot.
         if ($verifyData.Evt1802 -eq "True") {
             $row.Notes += "Event 1802: update blocked by known firmware issue - contact OEM for firmware update. "
         }
@@ -1475,8 +2191,100 @@ foreach ($vm in $vms) {
         if ($verifyData.Evt1795 -eq "True") {
             $row.Notes += "Event 1795: firmware returned error on Secure Boot variable write - contact OEM for firmware update. "
         }
-        if ($verifyData.Evt1800 -eq "True") {
-            $row.Notes += "Event 1800: reboot required before Secure Boot update can proceed. "
+
+        # ------------------------------------------------------------------
+        # Step 7b - Extra reboot if Event 1801 or 1800 detected WITHOUT 1808
+        # Event 1801 is an intermediate state that is always followed by 1808
+        # once the firmware write completes. If 1808 is already present, the
+        # process is done and 1801 is simply a historical record from earlier
+        # in the same update sequence - no reboot needed.
+        # ------------------------------------------------------------------
+        if (($verifyData.Evt1801 -eq "True" -or $verifyData.Evt1800 -eq "True") -and $verifyData.Evt1808 -ne "True") {
+            Write-Host "  [7b/9] Extra reboot required (Event $( if ($verifyData.Evt1801 -eq 'True') {'1801'} else {'1800'} ) detected) - rebooting and re-verifying..." -ForegroundColor Yellow
+            Restart-VMGuest -VM $vm -Confirm:$false | Out-Null
+            Start-Sleep -Seconds $WaitSeconds
+            $vm = Get-VM -Name $vmName
+            if (-not (Wait-VMTools -VM $vm -TimeoutSeconds 300)) {
+                $row.Notes += "Tools timeout after 7b extra reboot. "
+                $row.SnapshotRetained = $snapCreated
+                $report.Add($row)
+                continue
+            }
+
+            $taskOut2 = Invoke-VMScript -VM $vm -ScriptText $taskTriggerScript `
+                -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+            Write-Host $taskOut2.ScriptOutput -ForegroundColor Gray
+
+            Write-Host "  [7b/9] Re-verifying after extra reboot..." -ForegroundColor Cyan
+            $verifyOut2  = Invoke-VMScript -VM $vm -ScriptText (Get-TimestampedVerifyScript -StartTime $vmRunStart) `
+                -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+            $verifyData2 = $null
+            try {
+                $lines2 = $verifyOut2.ScriptOutput -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+                if ($lines2 -contains "VERIFY_START" -and $lines2 -contains "VERIFY_END") {
+                    $map2 = @{}
+                    foreach ($line2 in $lines2) {
+                        if ($line2 -match '^([^=]+)=(.*)$') { $map2[$Matches[1]] = $Matches[2] }
+                    }
+                    $verifyData2 = [PSCustomObject]$map2
+                }
+            } catch {}
+
+            if ($null -ne $verifyData2) {
+                # Update row with fresh verify data
+                $verifyData      = $verifyData2
+                $row.KEK_2023    = $verifyData.KEK_2023
+                $row.DB_2023     = $verifyData.DB_2023
+                $row.FinalStatus = if ($verifyData.Servicing_Status) {
+                    $verifyData.Servicing_Status
+                } elseif ($verifyData.AvailableUpdates -eq "0x4000") {
+                    "Updated"
+                } else {
+                    "Unknown"
+                }
+                $row.Evt1808 = $verifyData.Evt1808
+                $row.Evt1801 = $verifyData.Evt1801
+                $row.Evt1800 = $verifyData.Evt1800
+                $row.Evt1802 = $verifyData.Evt1802
+                $row.Evt1803 = $verifyData.Evt1803
+                $row.Evt1795 = $verifyData.Evt1795
+                if ($verifyData.UEFICA2023ErrorExists -eq "True") {
+                    $row.UEFICA2023Error = "ERROR ($($verifyData.UEFICA2023ErrorValue))"
+                }
+
+                $color2 = if ($row.FinalStatus -eq "Updated" -and $verifyData.Evt1801 -ne "True") { "Green" } else { "Yellow" }
+                Write-Host (("  [7b/9] Post-reboot: Status: {0} | KEK 2023: {1} | DB 2023: {2} | AvailableUpdates: {3} | Evt 1808: {4}") -f
+                    $row.FinalStatus, $row.KEK_2023, $row.DB_2023,
+                    $verifyData.AvailableUpdates, $row.Evt1808) -ForegroundColor $color2
+
+                # If 1801 still present and 1808 still absent after extra reboot, diagnose the cause
+                if ($verifyData.Evt1801 -eq "True" -and $verifyData.Evt1808 -ne "True") {
+                    Write-Warning "  [7b/9] Event 1801 persists after extra reboot - investigating cause..."
+                    $row.Notes += "Event 1801 persisted after extra reboot. "
+
+                    if ($verifyData.Evt1802 -eq "True") {
+                        Write-Warning "    Event 1802: update blocked by known firmware issue - OEM firmware update required."
+                        $row.Notes += "Cause: Event 1802 - OEM firmware issue blocking update. Contact OEM for firmware update. "
+                    } elseif ($verifyData.Evt1795 -eq "True") {
+                        Write-Warning "    Event 1795: UEFI variable write-protected - OEM firmware update required."
+                        $row.Notes += "Cause: Event 1795 - UEFI variable write-protected. Contact OEM for firmware update. "
+                    } elseif ($verifyData.UEFICA2023ErrorExists -eq "True") {
+                        Write-Warning "    UEFICA2023Error registry key present (value: $($verifyData.UEFICA2023ErrorValue)) - deployment error occurred."
+                        $row.Notes += "Cause: UEFICA2023Error = $($verifyData.UEFICA2023ErrorValue). Trace via Event Viewer > System > TPM-WMI. "
+                    } elseif ($verifyData.AvailableUpdates -ne "0x4000" -and $verifyData.AvailableUpdates -ne "not found") {
+                        Write-Warning "    AvailableUpdates = $($verifyData.AvailableUpdates) - update task may not have completed. Trigger Secure-Boot-Update task manually."
+                        $row.Notes += "Cause: AvailableUpdates = $($verifyData.AvailableUpdates) after extra reboot - task may need manual trigger. "
+                    } else {
+                        Write-Warning "    No specific blocking event found - may need another reboot cycle or Windows Update."
+                        $row.Notes += "Cause undetermined - Event 1801 persists with no blocking error event. May resolve after Windows Update or another reboot cycle. "
+                    }
+                } else {
+                    Write-Host "  [7b/9] Complete - Event 1808 present$(if ($verifyData.Evt1801 -eq 'True') {' (1801 also present but 1808 confirms completion)'})." -ForegroundColor Green
+                }
+            } else {
+                Write-Warning "  [7b/9] Re-verify script returned no output after extra reboot."
+                $row.Notes += "Re-verify after 7b reboot returned no output - check VM manually. "
+            }
         }
 
         $certGood = ($row.FinalStatus -eq "Updated"   -and
@@ -1489,7 +2297,6 @@ foreach ($vm in $vms) {
             $row.FinalStatus, $row.KEK_2023, $row.DB_2023,
             $verifyData.AvailableUpdates, $row.Evt1808,
             $(if ($row.UEFICA2023Error) { " | RegError: $($row.UEFICA2023Error)" } else { "" })) -ForegroundColor $color
-        if ($verifyData.Evt1801 -eq "True") { Write-Host "    Event 1801: certs not yet applied to firmware - additional reboot may be needed." -ForegroundColor Yellow }
         if ($verifyData.Evt1802 -eq "True") { Write-Host "    Event 1802: update blocked by known firmware issue - contact OEM." -ForegroundColor Red }
         if ($verifyData.Evt1803 -eq "True") { Write-Host "    Event 1803: no PK-signed KEK found - PK remediation required." -ForegroundColor Yellow }
         if ($verifyData.Evt1795 -eq "True") { Write-Host "    Event 1795: firmware error on variable write - contact OEM." -ForegroundColor Red }
@@ -1573,7 +2380,7 @@ foreach ($vm in $vms) {
                 $row.Notes += "PK remediation skipped - host ESXi $hostVerStr requires manual disk/BIOS method (KB 423919). "
             } else {
 
-            Write-Host "  [9/9] Remediating PK via UEFI SetupMode (ESXi $hostVerStr)..." -ForegroundColor Yellow
+            Write-Host "  [9/9] Remediating PK via UEFI SetupMode (ESXi $hostVerStr)..." -ForegroundColor Cyan
 
             # --- BitLocker re-check before SetupMode reboot ---
             # The step 0 suspension (RebootCount 2) covers the cert-update power
@@ -1636,7 +2443,7 @@ foreach ($vm in $vms) {
             try {
                 Copy-VMGuestFile -Source $PKDerPath `
                     -Destination "C:\Windows\Temp\WindowsOEMDevicesPK.der" `
-                    -VM $vm -LocalToGuest -GuestCredential $GuestCredential -ErrorAction Stop
+                    -VM $vm -LocalToGuest -GuestCredential $GuestCredential -Force -ErrorAction Stop
                 Write-Host "    WindowsOEMDevicesPK.der copied." -ForegroundColor Green
             } catch {
                 throw "Failed to copy PK der file to guest: $($_.Exception.Message)"
@@ -1645,7 +2452,7 @@ foreach ($vm in $vms) {
                 try {
                     Copy-VMGuestFile -Source $KEKDerPath `
                         -Destination "C:\Windows\Temp\kek2023.der" `
-                        -VM $vm -LocalToGuest -GuestCredential $GuestCredential -ErrorAction Stop
+                        -VM $vm -LocalToGuest -GuestCredential $GuestCredential -Force -ErrorAction Stop
                     Write-Host "    kek2023.der copied." -ForegroundColor Green
                 } catch {
                     Write-Warning "    Failed to copy KEK der - KEK update will be skipped: $($_.Exception.Message)"
@@ -1762,7 +2569,7 @@ Write-Host "`n$('='*60)" -ForegroundColor White
 Write-Host "SUMMARY" -ForegroundColor White
 Write-Host "$('='*60)" -ForegroundColor White
 $report | Format-Table VMName, SnapshotCreated, BitLockerKeysBacked, BitLockerSuspended,
-    NVRAMRenamed, KEK_AfterNVRAM, UpdateTriggered, KEK_2023, DB_2023,
+    NVRAMRenamed, HWUpgraded, KEK_AfterNVRAM, UpdateTriggered, KEK_2023, DB_2023,
     FinalStatus, UEFICA2023Error, Evt1808, Evt1801, Evt1802, Evt1803, Evt1800, Evt1795,
     PK_Status, PKEnrolled, PKRemediated, SnapshotRetained, Notes -AutoSize
 
@@ -1818,4 +2625,3 @@ if ($noteVMs) {
         Write-Host "    $($n.Notes)"
     }
 }
-
