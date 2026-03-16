@@ -110,6 +110,13 @@
     Seconds to wait after issuing a reboot before polling for Tools.
     Default 90. Increase for slower VMs.
 
+.PARAMETER InterVMDelay
+    Seconds to wait between processing each VM. Useful when remediating paired
+    or co-dependent VMs (e.g. primary/secondary, database/app server) where the
+    first VM needs time to fully start its services before the next VM is processed.
+    Default 0 (no delay). The delay is applied after each VM completes, except
+    the last VM in the batch.
+
 .PARAMETER IgnoreCertificateWarnings
     When specified, sets PowerCLI InvalidCertificateAction to Ignore for the
     current session before connecting to vCenter. Only use this if your vCenter
@@ -250,6 +257,7 @@ param(
     [string]$PKDerPath,
     [string]$KEKDerPath,
     [int]$WaitSeconds = 90,
+    [int]$InterVMDelay = 0,
     [switch]$IgnoreCertificateWarnings,
     [switch]$Assess,
     [switch]$UpgradeHardware
@@ -351,7 +359,9 @@ if ($VMListCsv) {
         return
     }
     $csvVMNames = $csvData | Where-Object { $_.VMName -ne "" } |
-                  Select-Object -ExpandProperty VMName -Unique
+                  Select-Object -ExpandProperty VMName
+    # Deduplicate while preserving input order
+    $seen = @{}; $csvVMNames = $csvVMNames | Where-Object { -not $seen[$_] -and ($seen[$_] = $true) }
     Write-Host "Loaded $($csvVMNames.Count) VM name(s) from CSV: $VMListCsv" -ForegroundColor Cyan
 }
 
@@ -368,10 +378,11 @@ function Resolve-TargetVMs {
     $names = @()
     if ($VMName)     { $names += $VMName     }
     if ($csvVMNames) { $names += $csvVMNames }
-    $names = $names | Select-Object -Unique
+    # Deduplicate while preserving input order
+    $seen = @{}; $names = $names | Where-Object { -not $seen[$_] -and ($seen[$_] = $true) }
 
     if ($names.Count -gt 0) {
-        # When specific VM names are provided, look them up directly.
+        # When specific VM names are provided, look them up directly in the order given.
         # Do not apply OS or Secure Boot filters - the operator has explicitly
         # named the target VMs and guest info may be stale after a revert or reboot.
         $resolved = foreach ($name in $names) {
@@ -381,7 +392,9 @@ function Resolve-TargetVMs {
             }
             $found
         }
-        $resolved = $resolved | Where-Object { $_ } | Sort-Object -Property Id -Unique
+        # Filter nulls; preserve order without sorting
+        $seenIds = @{}
+        $resolved = $resolved | Where-Object { $_ -and -not $seenIds[$_.Id] -and ($seenIds[$_.Id] = $true) }
         return $resolved
     }
 
@@ -543,6 +556,137 @@ function Invoke-VMHardwareUpgrade {
         Write-Warning "    $($result.Notes)"
     }
     return $result
+}
+
+# Returns datastore name, free space, estimated snapshot size, and whether
+# there is sufficient space for a snapshot of this VM.
+# Snapshot size estimate: sum of committed (written) bytes across all VM disks
+# on the datastore. This represents the worst-case snapshot growth if every
+# block is overwritten during the remediation window. In practice snapshots
+# will be much smaller, so this is a conservative upper bound.
+# Warns if estimated snapshot exceeds the configured threshold of free space.
+# Formats a byte count into a human-readable string at the most appropriate unit.
+function Format-Bytes {
+    param([double]$Bytes)
+    if     ($Bytes -ge 1GB) { return "$([math]::Round($Bytes / 1GB, 2)) GB" }
+    elseif ($Bytes -ge 1MB) { return "$([math]::Round($Bytes / 1MB, 2)) MB" }
+    elseif ($Bytes -ge 1KB) { return "$([math]::Round($Bytes / 1KB, 2)) KB" }
+    else                    { return "$([math]::Round($Bytes, 0)) B" }
+}
+
+function Get-VMDatastoreSpaceInfo {
+    param(
+        $VMObj,
+        [double]$WarnThresholdPct = 0.80,  # warn if snapshot estimate > 80% of free space
+        [double]$SnapFallbackGB   = 2.0    # fallback estimate when VM has snapshots but size unavailable
+    )
+    try {
+        $vmView  = $VMObj | Get-View
+        $dsName  = ($vmView.Config.Files.VmPathName -replace '^\[(.+?)\].*', '$1')
+        $ds      = Get-Datastore -Name $dsName -EA Stop
+        $freeGB  = [math]::Round($ds.FreeSpaceGB, 2)
+        $capGB   = [math]::Round($ds.CapacityGB, 2)
+        $usedGB  = [math]::Round($capGB - $freeGB, 2)
+
+        # Check for existing snapshots - if any exist the VM's disks are already
+        # in delta-write mode. A new snapshot will only capture writes made during
+        # the remediation window (a few reboots) rather than the full committed
+        # disk size, so the estimate should be much smaller.
+        $existingSnaps   = Get-Snapshot -VM $VMObj -EA SilentlyContinue
+        $hasSnaps        = ($null -ne $existingSnaps -and @($existingSnaps).Count -gt 0)
+        $estimateGB      = 0
+        $estimateBasis   = ""
+
+        # VMware creates one 16 MB delta file per virtual disk at snapshot time.
+        # This is the documented minimum snapshot size regardless of VM activity.
+        $diskCount     = @($vmView.Config.Hardware.Device |
+            Where-Object { $_ -is [VMware.Vim.VirtualDisk] }).Count
+        $baselineBytes = [math]::Max($diskCount, 1) * 16MB
+
+        if ($hasSnaps) {
+            # Get actual on-disk sizes of existing snapshot delta files from LayoutEx.
+            # LayoutEx.File contains every file associated with the VM with real byte sizes.
+            # snapshotData = -delta.vmdk files; snapshotExtent = additional delta extents.
+            # This gives actual disk consumption per snapshot, not provisioned capacity.
+            $snapFiles = $vmView.LayoutEx.File |
+                Where-Object { $_.Type -in @("snapshotData","snapshotExtent") }
+            $totalSnapBytes = ($snapFiles | Measure-Object -Property Size -Sum).Sum
+
+            if ($totalSnapBytes -gt 0) {
+                $snapCount      = @($existingSnaps).Count
+                $estimateBytes  = $totalSnapBytes / $snapCount
+                $estimateGB     = [math]::Round($estimateBytes / 1GB, 2)
+                $estimateDisplay = Format-Bytes -Bytes $estimateBytes
+                $estimateBasis  = "delta avg ($snapCount existing snapshot(s), actual on-disk size)"
+                $fallbackUsed   = $false
+            } else {
+                # LayoutEx data unavailable - use conservative fixed fallback
+                $estimateBytes   = $SnapFallbackGB * 1GB
+                $estimateGB      = $SnapFallbackGB
+                $estimateDisplay = Format-Bytes -Bytes $estimateBytes
+                $estimateBasis   = "fixed $($SnapFallbackGB) GB fallback (existing snapshots detected but delta size unavailable from vCenter)"
+                $fallbackUsed    = $true
+            }
+        } else {
+            # No existing snapshots - use committed disk bytes as upper bound
+            $storageUsage = $vmView.Storage.PerDatastoreUsage |
+                Where-Object { (Get-Datastore -Id $_.Datastore -EA SilentlyContinue).Name -eq $dsName }
+            $estimateBytes = if ($storageUsage) {
+                ($storageUsage | Measure-Object -Property Committed -Sum).Sum
+            } else { 0 }
+            $estimateGB      = [math]::Round($estimateBytes / 1GB, 2)
+            $estimateDisplay = Format-Bytes -Bytes $estimateBytes
+            $estimateBasis   = "committed disk size (no existing snapshots)"
+            $fallbackUsed    = $false
+        }
+
+        # Apply 16 MB per-disk baseline floor. VMware allocates a 16 MB delta
+        # file per virtual disk at snapshot creation time regardless of activity.
+        if ($estimateBytes -lt $baselineBytes) {
+            $estimateBytes   = $baselineBytes
+            $estimateGB      = [math]::Round($estimateBytes / 1GB, 2)
+            $estimateDisplay = Format-Bytes -Bytes $estimateBytes
+            $estimateBasis   += " (raised to 16 MB/disk baseline: $diskCount disk(s))"
+        }
+
+        $sufficient = $true
+        $warning    = ""
+        if ($estimateGB -gt 0 -and $estimateGB -gt ($freeGB * $WarnThresholdPct)) {
+            $sufficient = $false
+            $warning    = "Estimated snapshot ($estimateDisplay, basis: $estimateBasis) exceeds $([int]($WarnThresholdPct*100))% of free space ($freeGB GB free on $dsName)."
+        } elseif ($freeGB -lt 5) {
+            $sufficient = $false
+            $warning    = "Less than 5 GB free on datastore $dsName ($freeGB GB free)."
+        }
+
+        return [PSCustomObject]@{
+            Datastore        = $dsName
+            CapacityGB       = $capGB
+            FreeGB           = $freeGB
+            UsedGB           = $usedGB
+            EstimateGB       = $estimateGB
+            EstimateDisplay  = $estimateDisplay
+            EstimateBasis    = $estimateBasis
+            HasSnapshots     = $hasSnaps
+            FallbackUsed     = $fallbackUsed
+            Sufficient       = $sufficient
+            Warning          = $warning
+        }
+    } catch {
+        return [PSCustomObject]@{
+            Datastore        = "Unknown"
+            CapacityGB       = 0
+            FreeGB           = 0
+            UsedGB           = 0
+            EstimateGB       = 0
+            EstimateDisplay  = "0 B"
+            EstimateBasis    = "check failed"
+            HasSnapshots     = $false
+            FallbackUsed     = $false
+            Sufficient       = $true   # don't block on lookup failure
+            Warning          = "Datastore space check failed: $($_.Exception.Message)"
+        }
+    }
 }
 
 # Renames the active .nvram file to .nvram_old so ESXi regenerates a fresh
@@ -1068,6 +1212,9 @@ if ($Assess) {
             $hasSnapshot = ($null -ne ($snaps | Where-Object { $_.Name -match "Pre-SecureBoot-Fix|Pre-HWUpgrade" }))
         } catch {}
 
+        # Datastore space check
+        $dsInfo = Get-VMDatastoreSpaceInfo -VMObj $vm
+
         $row = [PSCustomObject]@{
             VMName           = $vmName
             PowerState       = $vm.PowerState
@@ -1079,6 +1226,11 @@ if ($Assess) {
             SecureBoot       = if ($firmware -eq "efi") { $sbEnabled.ToString() } else { "N/A (BIOS)" }
             NvramOldExists   = $hasNvramOld
             SnapshotExists   = $hasSnapshot
+            Datastore        = $dsInfo.Datastore
+            DSFreeGB         = $dsInfo.FreeGB
+            DSCapacityGB     = $dsInfo.CapacityGB
+            SnapshotEstimateGB = $dsInfo.EstimateGB
+            DSSpaceOK        = $dsInfo.Sufficient
             # Guest-level (populated below if credentials provided and VM accessible)
             KEK_2023         = "Not collected"
             DB_2023          = "Not collected"
@@ -1102,6 +1254,18 @@ if ($Assess) {
         Write-Host "  Firmware   : $firmware | Secure Boot: $($row.SecureBoot)"
         Write-Host "  Power      : $($vm.PowerState)"
         Write-Host "  nvram_old  : $hasNvramOld | Snapshot: $hasSnapshot"
+        $dsColor = if ($dsInfo.Sufficient) { "Gray" } else { "Yellow" }
+        Write-Host "  Datastore  : $($dsInfo.Datastore) | Free: $($dsInfo.FreeGB) GB / $($dsInfo.CapacityGB) GB | Snapshot est: $($dsInfo.EstimateDisplay) ($($dsInfo.EstimateBasis))" -ForegroundColor $dsColor
+        if ($dsInfo.FallbackUsed) {
+            Write-Host "  NOTE: Snapshot estimate is a fixed $($dsInfo.EstimateDisplay) fallback - vCenter could not determine delta size from existing snapshots." -ForegroundColor Yellow
+        }
+        if (-not $dsInfo.Sufficient) {
+            Write-Warning "  Space warning: $($dsInfo.Warning)"
+            $row.Notes += "Datastore space warning: $($dsInfo.Warning) "
+            if (-not ("Insufficient datastore space" -in ($row.ActionNeeded -split " \| "))) {
+                # will be appended to ActionNeeded below if no other actions already set
+            }
+        }
 
         if ($hwVerNum -lt 21) { $row.Notes += "HW version $hwVerNum < 21 - upgrade before remediation. " }
         if ($firmware -ne "efi") { $row.Notes += "BIOS firmware - not eligible for Secure Boot cert update. " }
@@ -1143,6 +1307,7 @@ if ($Assess) {
 
         # Derive ActionNeeded summary
         $actions = [System.Collections.Generic.List[string]]::new()
+        if (-not $dsInfo.Sufficient)                               { $actions.Add("Insufficient datastore space") }
         if ($firmware -ne "efi")                               { $actions.Add("N/A - BIOS") }
         elseif ($sbEnabled -eq $false)                         { $actions.Add("Enable Secure Boot") }
         else {
@@ -1169,7 +1334,8 @@ if ($Assess) {
     Write-Host "ASSESS SUMMARY" -ForegroundColor White
     Write-Host "$('='*60)" -ForegroundColor White
     $assessReport | Format-Table VMName, PowerState, HWVersion, HWVersionOK, ESXiVersion,
-        SecureBoot, KEK_2023, DB_2023, PK_Status, UEFICA2023Status,
+        SecureBoot, Datastore, DSFreeGB, SnapshotEstimateGB, DSSpaceOK,
+        KEK_2023, DB_2023, PK_Status, UEFICA2023Status,
         UEFICA2023Error, Evt1808, BitLockerActive, ActionNeeded -AutoSize
 
     $csvPath = ".\SecureBoot_Assess_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
@@ -1747,11 +1913,33 @@ if (-not $vms) { Write-Warning "No matching VMs found."; return }
 Write-Host "Targeting $($vms.Count) VM(s):`n  $($vms.Name -join "`n  ")" -ForegroundColor Cyan
 
 if ($NoSnapshot) {
-    Write-Host "Snapshot mode   : DISABLED (-NoSnapshot specified)" -ForegroundColor Yellow
+    Write-Host "Snapshot mode   : DISABLED (-NoSnapshot specified)." -ForegroundColor Yellow
 } else {
     Write-Host "Snapshot name   : $snapshotName" -ForegroundColor Cyan
     Write-Host "Retain snapshots: $RetainSnapshots" -ForegroundColor Cyan
-    Write-Host "`nEnsure sufficient datastore space for $($vms.Count) snapshot(s) before proceeding." -ForegroundColor Yellow
+
+    # Datastore space check - run before confirmation so issues are visible upfront
+    Write-Host "`nChecking datastore space for $($vms.Count) VM(s)..." -ForegroundColor Cyan
+    $spaceWarnings = 0
+    foreach ($sv in $vms) {
+        $dsInfo = Get-VMDatastoreSpaceInfo -VMObj $sv
+        $color  = if ($dsInfo.Sufficient) { "Gray" } else { "Yellow" }
+        Write-Host ("  {0,-30} DS: {1,-25} Free: {2,7} GB   Est snapshot: {3,10}   {4}" -f
+            $sv.Name, $dsInfo.Datastore, $dsInfo.FreeGB, $dsInfo.EstimateDisplay,
+            $(if (-not $dsInfo.Sufficient) { "<<< WARNING" } elseif ($dsInfo.FallbackUsed) { "(fixed fallback)" } else { "" })) -ForegroundColor $color
+        if ($dsInfo.FallbackUsed) {
+            Write-Host "    NOTE: $($sv.Name) - snapshot estimate is a fixed $($dsInfo.EstimateDisplay) fallback (existing snapshots detected, delta size unavailable from vCenter)." -ForegroundColor Yellow
+        }
+        if (-not $dsInfo.Sufficient) {
+            Write-Warning "  $($dsInfo.Warning)"
+            $spaceWarnings++
+        }
+    }
+    if ($spaceWarnings -gt 0) {
+        Write-Warning "$spaceWarnings VM(s) have potential datastore space issues. Review warnings above before continuing."
+    } else {
+        Write-Host "  Space check OK." -ForegroundColor Green
+    }
 }
 
 if ($Confirm) {
@@ -2560,6 +2748,14 @@ foreach ($vm in $vms) {
     }
 
     $report.Add($row)
+
+    # Inter-VM delay - applied after each VM except the last in the batch.
+    # Allows co-dependent or paired VMs time to fully start services before
+    # the next VM is processed.
+    if ($InterVMDelay -gt 0 -and $vm -ne $vms[-1]) {
+        Write-Host "`n  Waiting $InterVMDelay second(s) before next VM (-InterVMDelay)..." -ForegroundColor Gray
+        Start-Sleep -Seconds $InterVMDelay
+    }
 }
 
 # =============================================================================
