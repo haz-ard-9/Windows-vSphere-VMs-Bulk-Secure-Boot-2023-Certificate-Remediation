@@ -739,6 +739,44 @@ It includes:
 
 ---
 
+## Parallel Execution
+
+For larger environments, multiple instances of the script can be run simultaneously in separate PowerShell processes to parallelize remediation across different sets of VMs. Each instance maintains its own vCenter session, and timestamped output CSVs and snapshot names mean there is no file-level collision between concurrent runs.
+
+### How to split workloads
+
+Target non-overlapping sets of VMs across instances. The cleanest split is by ESXi host, which keeps snapshot I/O and Tools wait pressure localized:
+
+```powershell
+# Terminal 1 - VMs on esxi01
+.\FixSecureBootBulk.ps1 -VMName "vm01","vm02","vm03" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -Confirm
+
+# Terminal 2 - VMs on esxi02
+.\FixSecureBootBulk.ps1 -VMName "vm04","vm05","vm06" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -Confirm
+
+# Terminal 3 - VMs on esxi03
+.\FixSecureBootBulk.ps1 -VMName "vm07","vm08","vm09" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -Confirm
+```
+
+Use `-Confirm` on all instances so no interactive prompts block unattended runs.
+
+### Caveats
+
+**Datastore space estimates may be stale across parallel instances.** The space check runs once at startup before any snapshots are taken. If two instances target VMs on the same datastore, both will read the same free space figure without accounting for what the other is about to consume. For datastores with one VM per datastore (a common vSphere convention) this is not an issue. For shared datastores, multiply the per-VM snapshot estimates and verify there is sufficient headroom before running parallel instances against the same datastore.
+
+**ESXi host load.** Simultaneous power-off/power-on cycles on multiple VMs on the same host compound each other's boot time. If Tools wait timeouts are occurring, increase `-WaitSeconds` for parallel runs. Splitting batches by host avoids this entirely.
+
+**vCenter API concurrency.** vCenter handles concurrent sessions without issue under normal loads. Very high concurrency (10+ simultaneous instances) could begin approaching vCenter API rate limits depending on your environment configuration. For most environments 2-4 parallel instances is well within bounds. If you observe `Invoke-VMScript` failures or vCenter connection errors under high concurrency, reduce the number of parallel instances.
+
+**Do not target the same VM from multiple instances.** There is no inter-process locking. Two instances processing the same VM simultaneously will conflict on the snapshot name, NVRAM rename, and guest script execution. Always ensure each VM appears in exactly one instance's target list.
+
+**Maintain separate output CSVs per instance.** Each instance writes its own timestamped CSV. Review all output files after the run to confirm all VMs completed successfully. There is no merged output across parallel instances.
+
+---
+
 ## Troubleshooting
 
 ### VM shows `KEK_AfterNVRAM = False` after NVRAM regeneration
