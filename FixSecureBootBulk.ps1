@@ -701,6 +701,84 @@ function Remove-SnapshotsParallel {
     return $results
 }
 
+# Deletes a list of .nvram_old file items in parallel. Each file deletion is
+# fired as an async vSphere task via DeleteDatastoreFile_Task. All files are
+# dispatched simultaneously since they are small and deletion does not involve
+# disk consolidation. Polls every 3 seconds until all tasks complete.
+# Items with Skip=$true are passed through without deletion.
+# Returns a list of result PSObjects with Type, VMName, Item, SizeMB, Result, Notes.
+function Remove-NvramFilesParallel {
+    param([System.Collections.Generic.List[PSObject]]$Items)
+
+    $results = [System.Collections.Generic.List[PSObject]]::new()
+
+    $toDelete = $Items | Where-Object { -not $_.Skip }
+    foreach ($item in ($Items | Where-Object { $_.Skip })) {
+        $results.Add([PSCustomObject]@{
+            Type   = "NVRAM file"
+            VMName = $item.VMName
+            Item   = $item.FileName
+            SizeMB = [math]::Round($item.SizeKB / 1KB, 3)
+            Result = "Skipped"
+            Notes  = $item.Notes
+        })
+    }
+
+    if (-not $toDelete) { return $results }
+
+    # Fire all deletions simultaneously - files are small, no consolidation involved
+    $activeTasks = [System.Collections.Generic.List[PSObject]]::new()
+    foreach ($item in $toDelete) {
+        Write-Host "  Starting deletion of $($item.FileName) on $($item.VMName)..." -ForegroundColor Cyan
+        try {
+            $task = $item.FM.DeleteDatastoreFile_Task($item.FilePath, $item.DcRef)
+            $activeTasks.Add([PSCustomObject]@{
+                Task   = $task
+                Item   = $item
+                Done   = $false
+            })
+        } catch {
+            Write-Warning "  Failed to start deletion for $($item.VMName)/$($item.FileName): $($_.Exception.Message)"
+            $results.Add([PSCustomObject]@{
+                Type   = "NVRAM file"
+                VMName = $item.VMName
+                Item   = $item.FileName
+                SizeMB = [math]::Round($item.SizeKB / 1KB, 3)
+                Result = "Failed"
+                Notes  = $_.Exception.Message
+            })
+        }
+    }
+
+    # Poll until all tasks complete
+    while (($activeTasks | Where-Object { -not $_.Done }).Count -gt 0) {
+        Start-Sleep -Seconds 3
+        foreach ($entry in $activeTasks | Where-Object { -not $_.Done }) {
+            $taskView = Get-View $entry.Task -ErrorAction SilentlyContinue
+            if (-not $taskView -or $taskView.Info.State -notin @("running","queued")) {
+                $success = ($taskView -and $taskView.Info.State -eq "success")
+                $errMsg  = if (-not $success -and $taskView) { $taskView.Info.Error.LocalizedMessage } else { "" }
+                if ($success) {
+                    Write-Host "  Deleted $($entry.Item.FileName) on $($entry.Item.VMName)." -ForegroundColor Green
+                } else {
+                    Write-Warning "  Failed $($entry.Item.FileName) on $($entry.Item.VMName): $errMsg"
+                }
+                $results.Add([PSCustomObject]@{
+                    Type   = "NVRAM file"
+                    VMName = $entry.Item.VMName
+                    Item   = $entry.Item.FileName
+                    SizeMB = [math]::Round($entry.Item.SizeKB / 1KB, 3)
+                    Result = if ($success) { "Deleted" } else { "Failed" }
+                    Notes  = $errMsg
+                })
+                $entry.Done = $true
+            }
+        }
+    }
+
+    return $results
+}
+
 function Format-Bytes {
     param([double]$Bytes)
     if     ($Bytes -ge 1GB) { return "$([math]::Round($Bytes / 1GB, 2)) GB" }
@@ -1810,41 +1888,13 @@ if ($CleanupSnapshots -or $CleanupHWSnapshots -or $CleanupNvram) {
     }
 
     # -------------------------------------------------------------------------
-    # Step 3: Delete .nvram_old files
+    # -------------------------------------------------------------------------
+    # Step 3: Delete .nvram_old files (parallel - all dispatched simultaneously)
     # -------------------------------------------------------------------------
     if ($CleanupNvram -and $nvramFiles.Count -gt 0) {
         Write-Host "`n--- Deleting .nvram_old files ---" -ForegroundColor Cyan
-        foreach ($item in $nvramFiles) {
-            $resultRow = [PSCustomObject]@{
-                Type   = "NVRAM file"
-                VMName = $item.VMName
-                Item   = $item.FileName
-                SizeMB = [math]::Round($item.SizeKB / 1KB, 3)
-                Result = "Pending"
-                Notes  = $item.Notes
-            }
-            if ($item.Skip) {
-                $resultRow.Result = "Skipped"
-                $cleanupReport.Add($resultRow)
-                continue
-            }
-            Write-Host "  Deleting $($item.FileName) on $($item.VMName)..." -ForegroundColor Cyan
-            try {
-                $task = $item.FM.DeleteDatastoreFile_Task($item.FilePath, $item.DcRef)
-                if (Wait-DatastoreTask -Task $task -TimeoutSeconds 30) {
-                    Write-Host "    Deleted." -ForegroundColor Green
-                    $resultRow.Result = "Deleted"
-                } else {
-                    Write-Warning "    Task timed out."
-                    $resultRow.Result = "Timeout"
-                }
-            } catch {
-                Write-Warning "    Failed: $($_.Exception.Message)"
-                $resultRow.Result = "Failed"
-                $resultRow.Notes  = $_.Exception.Message
-            }
-            $cleanupReport.Add($resultRow)
-        }
+        $step3Results = Remove-NvramFilesParallel -Items $nvramFiles
+        foreach ($r in $step3Results) { $cleanupReport.Add($r) }
     }
 
     # -------------------------------------------------------------------------
