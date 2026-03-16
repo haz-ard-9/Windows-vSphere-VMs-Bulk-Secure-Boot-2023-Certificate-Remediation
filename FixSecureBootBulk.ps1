@@ -54,25 +54,26 @@
     later to remove them. Cannot be combined with -NoSnapshot.
 
 .PARAMETER CleanupSnapshots
-    Snapshot cleanup mode. Finds and removes all Pre-SecureBoot-Fix* snapshots
-    on target VMs. Does not require -GuestCredential. Run this after a
-    validation period to reclaim datastore space.
-    Always run -CleanupSnapshots BEFORE -CleanupNvram - the snapshot is your
-    rollback path.
+    Removes all Pre-SecureBoot-Fix* snapshots on target VMs. Does not require
+    -GuestCredential. Can be combined with -CleanupHWSnapshots and -CleanupNvram
+    in a single run. When combined, ordering is enforced internally: SecureBoot-Fix
+    snapshots are removed first, then HWUpgrade snapshots, then .nvram_old files.
+    Non-managed child snapshots on a VM will cause that snapshot to be skipped
+    with a warning.
 
 .PARAMETER CleanupHWSnapshots
-    Hardware upgrade snapshot cleanup mode. Finds and removes all
-    Pre-HWUpgrade* snapshots created by standalone -UpgradeHardware runs.
-    Does not require -GuestCredential. Run this after verifying the hardware
-    version upgrade is stable and no rollback is needed.
+    Removes all Pre-HWUpgrade* snapshots created by standalone -UpgradeHardware
+    runs. Does not require -GuestCredential. Can be combined with -CleanupSnapshots
+    and -CleanupNvram. If a Pre-HWUpgrade snapshot has Pre-SecureBoot-Fix child
+    snapshots, it will be skipped unless -CleanupSnapshots is also specified, in
+    which case the children are removed first automatically.
 
 .PARAMETER CleanupNvram
-    NVRAM cleanup mode. Finds and deletes all .nvram_old files left on target
-    VM datastores. Does not require -GuestCredential. Run this AFTER
-    -CleanupSnapshots, once you are fully satisfied there are no issues and
-    no rollback will be needed. The script will warn if a VM still has a
-    Pre-SecureBoot-Fix* snapshot, indicating the validation period may not
-    be complete.
+    Deletes all .nvram_old files left on target VM datastores. Does not require
+    -GuestCredential. Can be combined with -CleanupSnapshots and -CleanupHWSnapshots.
+    When combined, .nvram_old files are always deleted last, after all snapshots
+    have been removed. If run alone while Pre-SecureBoot-Fix* snapshots still exist,
+    a warning is logged but deletion proceeds - no rollback path will remain.
 
 .PARAMETER Rollback
     Rollback mode. For each target VM:
@@ -174,26 +175,22 @@
     # Rollback using a previous run's output CSV
     .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" -Rollback
 
-    # After validation period - remove snapshots for specific VMs
-    .\FixSecureBootBulk.ps1 -VMName "vm01","vm02","vm03","vm04" -CleanupSnapshots
+    # After validation period - clean up all snapshots and .nvram_old files in one pass
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" `
+        -CleanupSnapshots -CleanupNvram
 
-    # After validation period - remove snapshots for ALL VMs at once
+    # If -UpgradeHardware was used, include -CleanupHWSnapshots as well
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" `
+        -CleanupSnapshots -CleanupHWSnapshots -CleanupNvram
+
+    # Cleanup can also target specific VMs or all VMs without a CSV
+    .\FixSecureBootBulk.ps1 -VMName "vm01","vm02","vm03","vm04" -CleanupSnapshots -CleanupNvram
+    .\FixSecureBootBulk.ps1 -CleanupSnapshots -CleanupNvram
+
+    # Individual cleanup operations are still supported when needed
     .\FixSecureBootBulk.ps1 -CleanupSnapshots
-
-    # Feed a previous run's output CSV back in to clean up snapshots for that batch
-    .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" -CleanupSnapshots
-
-    # After snapshots are removed - delete .nvram_old files for ALL VMs
     .\FixSecureBootBulk.ps1 -CleanupNvram
-
-    # Feed a previous run's output CSV back in to clean up NVRAM for that batch
-    .\FixSecureBootBulk.ps1 -VMListCsv ".\SecureBoot_Bulk_20260227_124728.csv" -CleanupNvram
-
-    # Remove Pre-HWUpgrade* snapshots after verifying hardware upgrade is stable
     .\FixSecureBootBulk.ps1 -CleanupHWSnapshots
-
-    # Remove Pre-HWUpgrade* snapshots for specific VMs
-    .\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -CleanupHWSnapshots
 
     # Full remediation including PK enrollment (recommended - download WindowsOEMDevicesPK.der first)
     .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
@@ -271,9 +268,17 @@ if ($NoSnapshot -and $RetainSnapshots) {
     return
 }
 
-$modeSwitches = @($CleanupSnapshots, $CleanupHWSnapshots, $CleanupNvram, $Rollback, $Assess) | Where-Object { $_ }
-if ($modeSwitches.Count -gt 1) {
-    Write-Error "-CleanupSnapshots, -CleanupHWSnapshots, -CleanupNvram, -Rollback, and -Assess are mutually exclusive. Specify only one."
+# Cleanup switches (-CleanupSnapshots, -CleanupHWSnapshots, -CleanupNvram) can be
+# combined freely with each other. Ordering is enforced internally: SecureBoot-Fix
+# snapshots first (children), then HWUpgrade snapshots (parents), then .nvram_old files.
+$cleanupCount = @($CleanupSnapshots, $CleanupHWSnapshots, $CleanupNvram) | Where-Object { $_ } | Measure-Object | Select-Object -ExpandProperty Count
+$nonCleanupCount = @($Rollback, $Assess) | Where-Object { $_ } | Measure-Object | Select-Object -ExpandProperty Count
+if ($cleanupCount -gt 0 -and $nonCleanupCount -gt 0) {
+    Write-Error "-CleanupSnapshots, -CleanupHWSnapshots, and -CleanupNvram cannot be combined with -Rollback or -Assess."
+    return
+}
+if ($nonCleanupCount -gt 1) {
+    Write-Error "-Rollback and -Assess are mutually exclusive."
     return
 }
 if ($Assess -and ($NoSnapshot -or $RetainSnapshots -or $BitLockerBackupShare -or $PKDerPath -or $KEKDerPath)) {
@@ -566,6 +571,136 @@ function Invoke-VMHardwareUpgrade {
 # will be much smaller, so this is a conservative upper bound.
 # Warns if estimated snapshot exceeds the configured threshold of free space.
 # Formats a byte count into a human-readable string at the most appropriate unit.
+# Removes a list of snapshot items in parallel across hosts, serializing within
+# shared datastores to avoid competing I/O consolidation on the same storage.
+# Items with Skip=$true are passed through without removal.
+# Returns a list of result PSObjects with Type, VMName, Item, SizeMB, Result, Notes.
+function Remove-SnapshotsParallel {
+    param(
+        [System.Collections.Generic.List[PSObject]]$Items,
+        [string]$TypeLabel
+    )
+    $results = [System.Collections.Generic.List[PSObject]]::new()
+
+    # Separate skipped items immediately
+    $toRemove = $Items | Where-Object { -not $_.Skip }
+    foreach ($item in ($Items | Where-Object { $_.Skip })) {
+        $results.Add([PSCustomObject]@{
+            Type   = $TypeLabel
+            VMName = $item.VMName
+            Item   = $item.SnapName
+            SizeMB = $item.SizeMB
+            Result = "Skipped"
+            Notes  = $item.Notes
+        })
+    }
+
+    if (-not $toRemove) { return $results }
+
+    # Group by datastore. VMs on different datastores can run in parallel.
+    # VMs sharing a datastore run sequentially within that group.
+    $dsGroups = @{}
+    foreach ($item in $toRemove) {
+        $vmView = (Get-VM -Name $item.VMName -ErrorAction SilentlyContinue) | Get-View
+        $ds     = if ($vmView) { $vmView.Config.Files.VmPathName -replace '^\[(.+?)\].*', '$1' } else { "unknown" }
+        if (-not $dsGroups.ContainsKey($ds)) { $dsGroups[$ds] = [System.Collections.Generic.List[PSObject]]::new() }
+        $dsGroups[$ds].Add($item)
+    }
+
+    # Fire the first item in each datastore group async, then process remaining
+    # items in that group sequentially once the first completes.
+    # This gives parallelism across hosts/datastores while protecting shared storage.
+    $activeTasks = @{}   # dsName -> @{ Task; Item; Remaining }
+
+    # Launch one task per datastore group simultaneously
+    foreach ($ds in $dsGroups.Keys) {
+        $group = $dsGroups[$ds]
+        $first = $group[0]
+        Write-Host "  [$ds] Starting removal of '$($first.SnapName)' on $($first.VMName)..." -ForegroundColor Cyan
+        try {
+            $task = Remove-Snapshot -Snapshot $first.Snapshot -Confirm:$false -RunAsync -ErrorAction Stop
+            $activeTasks[$ds] = @{
+                Task      = $task
+                Item      = $first
+                Remaining = ($group | Select-Object -Skip 1)
+            }
+        } catch {
+            Write-Warning "  [$ds] Failed to start removal for $($first.VMName): $($_.Exception.Message)"
+            $results.Add([PSCustomObject]@{
+                Type   = $TypeLabel
+                VMName = $first.VMName
+                Item   = $first.SnapName
+                SizeMB = $first.SizeMB
+                Result = "Failed"
+                Notes  = $_.Exception.Message
+            })
+            # Still queue remaining items in this group for sequential processing
+            $activeTasks[$ds] = @{ Task = $null; Item = $first; Remaining = ($group | Select-Object -Skip 1) }
+        }
+    }
+
+    # Poll until all tasks and remaining queued items are done
+    while ($activeTasks.Count -gt 0) {
+        Start-Sleep -Seconds 5
+        $completed = @()
+        foreach ($ds in $activeTasks.Keys) {
+            $entry = $activeTasks[$ds]
+
+            # Check task state
+            if ($null -ne $entry.Task) {
+                $taskView = Get-View $entry.Task -ErrorAction SilentlyContinue
+                if (-not $taskView -or $taskView.Info.State -notin @("running","queued")) {
+                    $success = ($taskView -and $taskView.Info.State -eq "success")
+                    $errMsg  = if (-not $success -and $taskView) { $taskView.Info.Error.LocalizedMessage } else { "" }
+                    if ($success) {
+                        Write-Host "  [$ds] Removed '$($entry.Item.SnapName)' on $($entry.Item.VMName)." -ForegroundColor Green
+                    } else {
+                        Write-Warning "  [$ds] Failed '$($entry.Item.SnapName)' on $($entry.Item.VMName): $errMsg"
+                    }
+                    $results.Add([PSCustomObject]@{
+                        Type   = $TypeLabel
+                        VMName = $entry.Item.VMName
+                        Item   = $entry.Item.SnapName
+                        SizeMB = $entry.Item.SizeMB
+                        Result = if ($success) { "Removed" } else { "Failed" }
+                        Notes  = $errMsg
+                    })
+                    $entry.Task = $null  # mark done
+
+                    # Start next item in this datastore group if any remain
+                    if ($entry.Remaining -and @($entry.Remaining).Count -gt 0) {
+                        $next = @($entry.Remaining)[0]
+                        $entry.Remaining = @($entry.Remaining) | Select-Object -Skip 1
+                        Write-Host "  [$ds] Starting removal of '$($next.SnapName)' on $($next.VMName)..." -ForegroundColor Cyan
+                        try {
+                            $entry.Task = Remove-Snapshot -Snapshot $next.Snapshot -Confirm:$false -RunAsync -ErrorAction Stop
+                            $entry.Item = $next
+                        } catch {
+                            Write-Warning "  [$ds] Failed to start removal for $($next.VMName): $($_.Exception.Message)"
+                            $results.Add([PSCustomObject]@{
+                                Type   = $TypeLabel
+                                VMName = $next.VMName
+                                Item   = $next.SnapName
+                                SizeMB = $next.SizeMB
+                                Result = "Failed"
+                                Notes  = $_.Exception.Message
+                            })
+                            $entry.Item = $next
+                        }
+                    } else {
+                        $completed += $ds
+                    }
+                }
+            } else {
+                $completed += $ds
+            }
+        }
+        foreach ($ds in $completed) { $activeTasks.Remove($ds) }
+    }
+
+    return $results
+}
+
 function Format-Bytes {
     param([double]$Bytes)
     if     ($Bytes -ge 1GB) { return "$([math]::Round($Bytes / 1GB, 2)) GB" }
@@ -1488,282 +1623,245 @@ if ($isStandaloneUpgrade) {
 # =============================================================================
 # SNAPSHOT CLEANUP MODE
 # Finds and removes all Pre-SecureBoot-Fix* snapshots on target VMs.
-# Run after validation period. Always run before -CleanupNvram.
 # =============================================================================
-if ($CleanupSnapshots) {
-    Write-Host "`n=== SNAPSHOT CLEANUP MODE ===" -ForegroundColor Cyan
-    Write-Host "Searching for 'Pre-SecureBoot-Fix*' snapshots..." -ForegroundColor Cyan
+# CLEANUP MODE
+# Handles -CleanupSnapshots, -CleanupHWSnapshots, and -CleanupNvram.
+# All three can be combined in a single run. Ordering is enforced internally:
+#   1. Pre-SecureBoot-Fix* snapshots (children - removed first)
+#   2. Pre-HWUpgrade* snapshots      (parents  - removed second)
+#   3. .nvram_old files              (removed last, after snapshot rollback path is gone)
+# Child snapshots are detected before removal. If a managed snapshot has non-managed
+# children, it is skipped with a warning to avoid unexpected consolidation.
+# =============================================================================
+if ($CleanupSnapshots -or $CleanupHWSnapshots -or $CleanupNvram) {
+    Write-Host "`n=== CLEANUP MODE ===" -ForegroundColor Cyan
+    $modeList = @()
+    if ($CleanupSnapshots)   { $modeList += "Pre-SecureBoot-Fix* snapshots" }
+    if ($CleanupHWSnapshots) { $modeList += "Pre-HWUpgrade* snapshots" }
+    if ($CleanupNvram)       { $modeList += ".nvram_old files" }
+    Write-Host "Operations : $($modeList -join ', ')" -ForegroundColor Cyan
+    Write-Host "Order      : SecureBoot-Fix snapshots -> HWUpgrade snapshots -> NVRAM files" -ForegroundColor Gray
 
     $vms = Resolve-TargetVMs
     if (-not $vms) { Write-Warning "No matching VMs found."; return }
-
-    $snapsToRemove = [System.Collections.Generic.List[PSObject]]::new()
-    foreach ($vm in $vms) {
-        $snaps = Get-Snapshot -VM $vm -ErrorAction SilentlyContinue |
-                 Where-Object { $_.Name -like "${snapshotBaseName}*" }
-        foreach ($snap in $snaps) {
-            $snapsToRemove.Add([PSCustomObject]@{
-                VMName   = $vm.Name
-                SnapName = $snap.Name
-                Created  = $snap.Created
-                SizeMB   = [math]::Round($snap.SizeMB, 1)
-                Snapshot = $snap
-            })
-        }
-    }
-
-    if ($snapsToRemove.Count -eq 0) {
-        Write-Host "No matching snapshots found on target VMs." -ForegroundColor Green
-        return
-    }
-
-    Write-Host "`nSnapshots to be removed:" -ForegroundColor Yellow
-    $snapsToRemove | Format-Table VMName, SnapName, Created,
-        @{N="Size(MB)"; E={$_.SizeMB}} -AutoSize
-
-    $totalSizeMB = ($snapsToRemove | Measure-Object -Property SizeMB -Sum).Sum
-    Write-Host "Total snapshots : $($snapsToRemove.Count)"
-    Write-Host "Space reclaimed : $([math]::Round($totalSizeMB / 1024, 2)) GB" -ForegroundColor Yellow
-
-    $confirm = Read-Host "`nProceed with removal? (Y/N)"
-    if ($confirm -notmatch '^[Yy]') { Write-Host "Aborted."; return }
-
-    $cleanupReport = [System.Collections.Generic.List[PSObject]]::new()
-    foreach ($item in $snapsToRemove) {
-        Write-Host "  Removing snapshot on $($item.VMName)..." -ForegroundColor Cyan
-        $resultRow = [PSCustomObject]@{
-            VMName   = $item.VMName
-            SnapName = $item.SnapName
-            SizeMB   = $item.SizeMB
-            Result   = "Pending"
-            Notes    = ""
-        }
-        try {
-            Remove-Snapshot -Snapshot $item.Snapshot -Confirm:$false -ErrorAction Stop | Out-Null
-            Write-Host "    Removed: $($item.SnapName)" -ForegroundColor Green
-            $resultRow.Result = "Removed"
-        } catch {
-            Write-Warning "    Failed on $($item.VMName): $($_.Exception.Message)"
-            $resultRow.Result = "Failed"
-            $resultRow.Notes  = $_.Exception.Message
-        }
-        $cleanupReport.Add($resultRow)
-    }
-
-    Write-Host "`n=== CLEANUP SUMMARY ===" -ForegroundColor White
-    $cleanupReport | Format-Table VMName, SnapName, SizeMB, Result, Notes -AutoSize
-
-    $removed = ($cleanupReport | Where-Object { $_.Result -eq "Removed" }).Count
-    $failed  = ($cleanupReport | Where-Object { $_.Result -eq "Failed"  }).Count
-    Write-Host "Removed : $removed" -ForegroundColor Green
-    if ($failed -gt 0) {
-        Write-Host "Failed  : $failed (remove manually via vSphere client)" -ForegroundColor Red
-    }
-
-    $csvPath = ".\SecureBoot_SnapshotCleanup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $cleanupReport | Export-Csv -Path $csvPath -NoTypeInformation
-    Write-Host "Exported to: $csvPath" -ForegroundColor Green
-    return
-}
-
-# =============================================================================
-# HW UPGRADE SNAPSHOT CLEANUP MODE
-# Finds and removes all Pre-HWUpgrade* snapshots created by -UpgradeHardware.
-# Run after verifying the hardware version upgrade is stable.
-# =============================================================================
-if ($CleanupHWSnapshots) {
-    Write-Host "`n=== HW UPGRADE SNAPSHOT CLEANUP MODE ===" -ForegroundColor Cyan
-    Write-Host "Searching for 'Pre-HWUpgrade*' snapshots..." -ForegroundColor Cyan
-
-    $vms = Resolve-TargetVMs
-    if (-not $vms) { Write-Warning "No matching VMs found."; return }
-
-    $snapsToRemove = [System.Collections.Generic.List[PSObject]]::new()
-    foreach ($vm in $vms) {
-        $snaps = Get-Snapshot -VM $vm -ErrorAction SilentlyContinue |
-                 Where-Object { $_.Name -like "Pre-HWUpgrade*" }
-        foreach ($snap in $snaps) {
-            $snapsToRemove.Add([PSCustomObject]@{
-                VMName   = $vm.Name
-                SnapName = $snap.Name
-                Created  = $snap.Created
-                SizeMB   = [math]::Round($snap.SizeMB, 1)
-                Snapshot = $snap
-            })
-        }
-    }
-
-    if ($snapsToRemove.Count -eq 0) {
-        Write-Host "No Pre-HWUpgrade* snapshots found on target VMs." -ForegroundColor Green
-        return
-    }
-
-    Write-Host "`nSnapshots to be removed:" -ForegroundColor Yellow
-    $snapsToRemove | Format-Table VMName, SnapName, Created,
-        @{N="Size(MB)"; E={$_.SizeMB}} -AutoSize
-
-    $totalSizeMB = ($snapsToRemove | Measure-Object -Property SizeMB -Sum).Sum
-    Write-Host "Total snapshots : $($snapsToRemove.Count)"
-    Write-Host "Space reclaimed : $([math]::Round($totalSizeMB / 1024, 2)) GB" -ForegroundColor Yellow
-
-    $confirm = Read-Host "`nProceed with removal? (Y/N)"
-    if ($confirm -notmatch '^[Yy]') { Write-Host "Aborted."; return }
-
-    $cleanupReport = [System.Collections.Generic.List[PSObject]]::new()
-    foreach ($item in $snapsToRemove) {
-        Write-Host "  Removing snapshot on $($item.VMName)..." -ForegroundColor Cyan
-        $resultRow = [PSCustomObject]@{
-            VMName   = $item.VMName
-            SnapName = $item.SnapName
-            SizeMB   = $item.SizeMB
-            Result   = "Pending"
-            Notes    = ""
-        }
-        try {
-            Remove-Snapshot -Snapshot $item.Snapshot -Confirm:$false -ErrorAction Stop | Out-Null
-            Write-Host "    Removed: $($item.SnapName)" -ForegroundColor Green
-            $resultRow.Result = "Removed"
-        } catch {
-            Write-Warning "    Failed on $($item.VMName): $($_.Exception.Message)"
-            $resultRow.Result = "Failed"
-            $resultRow.Notes  = $_.Exception.Message
-        }
-        $cleanupReport.Add($resultRow)
-    }
-
-    Write-Host "`n=== HW SNAPSHOT CLEANUP SUMMARY ===" -ForegroundColor White
-    $cleanupReport | Format-Table VMName, SnapName, SizeMB, Result, Notes -AutoSize
-
-    $removed = ($cleanupReport | Where-Object { $_.Result -eq "Removed" }).Count
-    $failed  = ($cleanupReport | Where-Object { $_.Result -eq "Failed"  }).Count
-    Write-Host "Removed : $removed" -ForegroundColor Green
-    if ($failed -gt 0) {
-        Write-Host "Failed  : $failed (remove manually via vSphere client)" -ForegroundColor Red
-    }
-
-    $csvPath = ".\SecureBoot_HWSnapshotCleanup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $cleanupReport | Export-Csv -Path $csvPath -NoTypeInformation
-    Write-Host "Exported to: $csvPath" -ForegroundColor Green
-    return
-}
-
-# =============================================================================
-# NVRAM CLEANUP MODE
-# Deletes .nvram_old files left on datastores by the fix process.
-# Run AFTER -CleanupSnapshots. Warns if snapshots still exist.
-# =============================================================================
-if ($CleanupNvram) {
-    Write-Host "`n=== NVRAM CLEANUP MODE ===" -ForegroundColor Cyan
-    Write-Host "Searching for .nvram_old files on target VM datastores..." -ForegroundColor Cyan
-
-    $vms = Resolve-TargetVMs
-    if (-not $vms) { Write-Warning "No matching VMs found."; return }
-
-    $nvramToDelete    = [System.Collections.Generic.List[PSObject]]::new()
-    $snapshotWarnings = [System.Collections.Generic.List[string]]::new()
 
     $serviceInstance = Get-View ServiceInstance
     $fileManager     = Get-View $serviceInstance.Content.FileManager
 
+    # -------------------------------------------------------------------------
+    # Build the full work list across all VMs and all requested operations
+    # -------------------------------------------------------------------------
+    $sbSnaps    = [System.Collections.Generic.List[PSObject]]::new()  # Pre-SecureBoot-Fix*
+    $hwSnaps    = [System.Collections.Generic.List[PSObject]]::new()  # Pre-HWUpgrade*
+    $nvramFiles = [System.Collections.Generic.List[PSObject]]::new()  # .nvram_old
+
     foreach ($vm in $vms) {
-        $lingering = Get-Snapshot -VM $vm -ErrorAction SilentlyContinue |
-                     Where-Object { $_.Name -like "${snapshotBaseName}*" }
-        if ($lingering) { $snapshotWarnings.Add($vm.Name) }
+        $allSnaps = Get-Snapshot -VM $vm -ErrorAction SilentlyContinue
 
-        $vmView  = $vm | Get-View
-        $vmxPath = $vmView.Config.Files.VmPathName
-        $dsName  = $vmxPath -replace '^\[(.+?)\].*',         '$1'
-        $vmDir   = $vmxPath -replace '^\[.+?\] (.+)/[^/]+$', '$1'
-
-        try {
-            $dcRef     = (Get-Datacenter -VM $vm | Get-View).MoRef
-            $ds        = Get-Datastore -Name $dsName -ErrorAction Stop
-            $dsBrowser = Get-View $ds.ExtensionData.Browser
-            $spec      = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
-            $spec.MatchPattern = "*.nvram_old"
-            $results   = $dsBrowser.SearchDatastoreSubFolders("[$dsName] $vmDir", $spec)
-
-            if ($results -and $results.File) {
-                foreach ($file in $results.File) {
-                    $nvramToDelete.Add([PSCustomObject]@{
-                        VMName   = $vm.Name
-                        FileName = $file.Path
-                        FilePath = "[$dsName] $vmDir/$($file.Path)"
-                        SizeKB   = [math]::Round($file.FileSize / 1KB, 1)
-                        DcRef    = $dcRef
-                        FM       = $fileManager
-                    })
+        if ($CleanupSnapshots) {
+            $snaps = $allSnaps | Where-Object { $_.Name -like "${snapshotBaseName}*" }
+            foreach ($snap in $snaps) {
+                # Check for non-managed children - if any exist, warn and skip
+                $children = $allSnaps | Where-Object { $_.ParentSnapshotId -eq $snap.Id }
+                $unmanagedChildren = $children | Where-Object {
+                    $_.Name -notlike "${snapshotBaseName}*" -and $_.Name -notlike "Pre-HWUpgrade*"
                 }
+                $notes = ""
+                $skip  = $false
+                if ($unmanagedChildren) {
+                    $notes = "SKIPPED - has non-managed child snapshot(s): $($unmanagedChildren.Name -join ', '). Remove children first."
+                    $skip  = $true
+                    Write-Warning "  $($vm.Name): skipping '$($snap.Name)' - non-managed child snapshot(s) present: $($unmanagedChildren.Name -join ', ')"
+                }
+                $sbSnaps.Add([PSCustomObject]@{
+                    VMName   = $vm.Name
+                    SnapName = $snap.Name
+                    Created  = $snap.Created
+                    SizeMB   = [math]::Round($snap.SizeMB, 1)
+                    Snapshot = $snap
+                    Skip     = $skip
+                    Notes    = $notes
+                })
             }
-        } catch {
-            Write-Warning "  Could not search datastore for $($vm.Name): $($_.Exception.Message)"
+        }
+
+        if ($CleanupHWSnapshots) {
+            $snaps = $allSnaps | Where-Object { $_.Name -like "Pre-HWUpgrade*" }
+            foreach ($snap in $snaps) {
+                $children = $allSnaps | Where-Object { $_.ParentSnapshotId -eq $snap.Id }
+                $unmanagedChildren = $children | Where-Object {
+                    $_.Name -notlike "${snapshotBaseName}*" -and $_.Name -notlike "Pre-HWUpgrade*"
+                }
+                # Managed children (SecureBoot-Fix*) are handled first in step 1 above.
+                # Only warn if non-managed children remain after step 1 would run.
+                $managedChildren = $children | Where-Object { $_.Name -like "${snapshotBaseName}*" }
+                $notes = ""
+                $skip  = $false
+                if ($unmanagedChildren) {
+                    $notes = "SKIPPED - has non-managed child snapshot(s): $($unmanagedChildren.Name -join ', '). Remove children first."
+                    $skip  = $true
+                    Write-Warning "  $($vm.Name): skipping '$($snap.Name)' - non-managed child snapshot(s) present: $($unmanagedChildren.Name -join ', ')"
+                } elseif ($managedChildren -and -not $CleanupSnapshots) {
+                    $notes = "SKIPPED - has Pre-SecureBoot-Fix* child snapshot(s). Add -CleanupSnapshots to remove children first."
+                    $skip  = $true
+                    Write-Warning "  $($vm.Name): skipping '$($snap.Name)' - has Pre-SecureBoot-Fix* child(ren). Include -CleanupSnapshots to handle them."
+                }
+                $hwSnaps.Add([PSCustomObject]@{
+                    VMName   = $vm.Name
+                    SnapName = $snap.Name
+                    Created  = $snap.Created
+                    SizeMB   = [math]::Round($snap.SizeMB, 1)
+                    Snapshot = $snap
+                    Skip     = $skip
+                    Notes    = $notes
+                })
+            }
+        }
+
+        if ($CleanupNvram) {
+            $vmView  = $vm | Get-View
+            $vmxPath = $vmView.Config.Files.VmPathName
+            $dsName  = $vmxPath -replace '^\[(.+?)\].*',         '$1'
+            $vmDir   = $vmxPath -replace '^\[.+?\] (.+)/[^/]+$', '$1'
+            try {
+                $dcRef     = (Get-Datacenter -VM $vm | Get-View).MoRef
+                $ds        = Get-Datastore -Name $dsName -ErrorAction Stop
+                $dsBrowser = Get-View $ds.ExtensionData.Browser
+                $spec      = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
+                $spec.MatchPattern = "*.nvram_old"
+                $results   = $dsBrowser.SearchDatastoreSubFolders("[$dsName] $vmDir", $spec)
+                if ($results -and $results.File) {
+                    foreach ($file in $results.File) {
+                        $lingering = $allSnaps | Where-Object { $_.Name -like "${snapshotBaseName}*" }
+                        $notes = ""
+                        $skip  = $false
+                        if ($lingering -and -not $CleanupSnapshots) {
+                            $notes = "WARNING - Pre-SecureBoot-Fix* snapshot(s) still exist. Add -CleanupSnapshots or remove snapshots first."
+                            Write-Warning "  $($vm.Name): .nvram_old found but Pre-SecureBoot-Fix* snapshot(s) still exist - no rollback path will remain."
+                        }
+                        $nvramFiles.Add([PSCustomObject]@{
+                            VMName   = $vm.Name
+                            FileName = $file.Path
+                            FilePath = "[$dsName] $vmDir/$($file.Path)"
+                            SizeKB   = [math]::Round($file.FileSize / 1KB, 1)
+                            DcRef    = $dcRef
+                            FM       = $fileManager
+                            Skip     = $skip
+                            Notes    = $notes
+                        })
+                    }
+                }
+            } catch {
+                Write-Warning "  Could not search datastore for $($vm.Name): $($_.Exception.Message)"
+            }
         }
     }
 
-    if ($snapshotWarnings.Count -gt 0) {
-        Write-Host ""
-        Write-Warning "The following VMs still have Pre-SecureBoot-Fix* snapshots:"
-        $snapshotWarnings | ForEach-Object { Write-Warning "  $_" }
-        Write-Warning "Snapshots are your rollback path. Run -CleanupSnapshots first."
-        Write-Warning "You may still proceed, but you will have no rollback option."
-        Write-Host ""
-    }
-
-    if ($nvramToDelete.Count -eq 0) {
-        Write-Host "No .nvram_old files found on target VM datastores." -ForegroundColor Green
+    $totalItems = $sbSnaps.Count + $hwSnaps.Count + $nvramFiles.Count
+    if ($totalItems -eq 0) {
+        Write-Host "`nNothing to clean up on target VMs." -ForegroundColor Green
         return
     }
 
-    Write-Host "`n.nvram_old files to be deleted:" -ForegroundColor Yellow
-    $nvramToDelete | Format-Table VMName, FileName,
-        @{N="Size(KB)"; E={$_.SizeKB}} -AutoSize
+    # -------------------------------------------------------------------------
+    # Display summary and confirm
+    # -------------------------------------------------------------------------
+    if ($sbSnaps.Count -gt 0) {
+        Write-Host "`nPre-SecureBoot-Fix* snapshots to remove:" -ForegroundColor Yellow
+        $sbSnaps | Format-Table VMName, SnapName, Created,
+            @{N="Size(MB)"; E={$_.SizeMB}}, @{N="Status"; E={if ($_.Skip) {"SKIP"} else {"Remove"}}} -AutoSize
+    }
+    if ($hwSnaps.Count -gt 0) {
+        Write-Host "Pre-HWUpgrade* snapshots to remove:" -ForegroundColor Yellow
+        $hwSnaps | Format-Table VMName, SnapName, Created,
+            @{N="Size(MB)"; E={$_.SizeMB}}, @{N="Status"; E={if ($_.Skip) {"SKIP"} else {"Remove"}}} -AutoSize
+    }
+    if ($nvramFiles.Count -gt 0) {
+        Write-Host ".nvram_old files to delete:" -ForegroundColor Yellow
+        $nvramFiles | Format-Table VMName, FileName,
+            @{N="Size(KB)"; E={$_.SizeKB}}, @{N="Status"; E={if ($_.Skip) {"SKIP"} else {"Delete"}}} -AutoSize
+    }
 
-    $totalKB = ($nvramToDelete | Measure-Object -Property SizeKB -Sum).Sum
-    Write-Host "Total files     : $($nvramToDelete.Count)"
-    Write-Host "Space reclaimed : $([math]::Round($totalKB / 1KB, 2)) MB" -ForegroundColor Yellow
+    $snapTotal  = (($sbSnaps + $hwSnaps) | Where-Object { -not $_.Skip } | Measure-Object -Property SizeMB -Sum).Sum
+    $nvramTotal = ($nvramFiles | Where-Object { -not $_.Skip } | Measure-Object -Property SizeKB -Sum).Sum
+    Write-Host "Space reclaimed : $([math]::Round(($snapTotal + $nvramTotal / 1KB) / 1024, 2)) GB (approx)" -ForegroundColor Yellow
 
-    $confirm = Read-Host "`nProceed with deletion? (Y/N)"
-    if ($confirm -notmatch '^[Yy]') { Write-Host "Aborted."; return }
+    $confirmInput = Read-Host "`nProceed? (Y/N)"
+    if ($confirmInput -notmatch '^[Yy]') { Write-Host "Aborted."; return }
 
-    $nvramReport = [System.Collections.Generic.List[PSObject]]::new()
-    foreach ($item in $nvramToDelete) {
-        Write-Host "  Deleting $($item.FileName) on $($item.VMName)..." -ForegroundColor Cyan
-        $resultRow = [PSCustomObject]@{
-            VMName   = $item.VMName
-            FileName = $item.FileName
-            SizeKB   = $item.SizeKB
-            Result   = "Pending"
-            Notes    = ""
-        }
-        try {
-            $task = $item.FM.DeleteDatastoreFile_Task($item.FilePath, $item.DcRef)
-            if (Wait-DatastoreTask -Task $task -TimeoutSeconds 30) {
-                Write-Host "    Deleted: $($item.FileName)" -ForegroundColor Green
-                $resultRow.Result = "Deleted"
-            } else {
-                $resultRow.Result = "Failed"
-                $resultRow.Notes  = "Task did not complete successfully"
+    # -------------------------------------------------------------------------
+    # Step 1: Remove Pre-SecureBoot-Fix* snapshots (parallel across datastores)
+    # -------------------------------------------------------------------------
+    $cleanupReport = [System.Collections.Generic.List[PSObject]]::new()
+
+    if ($CleanupSnapshots -and $sbSnaps.Count -gt 0) {
+        Write-Host "`n--- Removing Pre-SecureBoot-Fix* snapshots ---" -ForegroundColor Cyan
+        $step1Results = Remove-SnapshotsParallel -Items $sbSnaps -TypeLabel "Snapshot (SecureBoot-Fix)"
+        foreach ($r in $step1Results) { $cleanupReport.Add($r) }
+    }
+
+    # -------------------------------------------------------------------------
+    # Step 2: Remove Pre-HWUpgrade* snapshots (parallel across datastores)
+    # -------------------------------------------------------------------------
+    if ($CleanupHWSnapshots -and $hwSnaps.Count -gt 0) {
+        Write-Host "`n--- Removing Pre-HWUpgrade* snapshots ---" -ForegroundColor Cyan
+        $step2Results = Remove-SnapshotsParallel -Items $hwSnaps -TypeLabel "Snapshot (HWUpgrade)"
+        foreach ($r in $step2Results) { $cleanupReport.Add($r) }
+    }
+
+    # -------------------------------------------------------------------------
+    # Step 3: Delete .nvram_old files
+    # -------------------------------------------------------------------------
+    if ($CleanupNvram -and $nvramFiles.Count -gt 0) {
+        Write-Host "`n--- Deleting .nvram_old files ---" -ForegroundColor Cyan
+        foreach ($item in $nvramFiles) {
+            $resultRow = [PSCustomObject]@{
+                Type   = "NVRAM file"
+                VMName = $item.VMName
+                Item   = $item.FileName
+                SizeMB = [math]::Round($item.SizeKB / 1KB, 3)
+                Result = "Pending"
+                Notes  = $item.Notes
             }
-        } catch {
-            Write-Warning "    Exception: $($_.Exception.Message)"
-            $resultRow.Result = "Failed"
-            $resultRow.Notes  = $_.Exception.Message
+            if ($item.Skip) {
+                $resultRow.Result = "Skipped"
+                $cleanupReport.Add($resultRow)
+                continue
+            }
+            Write-Host "  Deleting $($item.FileName) on $($item.VMName)..." -ForegroundColor Cyan
+            try {
+                $task = $item.FM.DeleteDatastoreFile_Task($item.FilePath, $item.DcRef)
+                if (Wait-DatastoreTask -Task $task -TimeoutSeconds 30) {
+                    Write-Host "    Deleted." -ForegroundColor Green
+                    $resultRow.Result = "Deleted"
+                } else {
+                    Write-Warning "    Task timed out."
+                    $resultRow.Result = "Timeout"
+                }
+            } catch {
+                Write-Warning "    Failed: $($_.Exception.Message)"
+                $resultRow.Result = "Failed"
+                $resultRow.Notes  = $_.Exception.Message
+            }
+            $cleanupReport.Add($resultRow)
         }
-        $nvramReport.Add($resultRow)
     }
 
-    Write-Host "`n=== NVRAM CLEANUP SUMMARY ===" -ForegroundColor White
-    $nvramReport | Format-Table VMName, FileName, SizeKB, Result, Notes -AutoSize
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    Write-Host "`n=== CLEANUP SUMMARY ===" -ForegroundColor White
+    $cleanupReport | Format-Table Type, VMName, Item, SizeMB, Result, Notes -AutoSize
 
-    $deleted = ($nvramReport | Where-Object { $_.Result -eq "Deleted" }).Count
-    $failed  = ($nvramReport | Where-Object { $_.Result -eq "Failed"  }).Count
-    Write-Host "Deleted : $deleted" -ForegroundColor Green
-    if ($failed -gt 0) {
-        Write-Host "Failed  : $failed (delete manually via datastore browser in vSphere client)" -ForegroundColor Red
-    }
+    $removed = ($cleanupReport | Where-Object { $_.Result -in @("Removed","Deleted") }).Count
+    $skipped = ($cleanupReport | Where-Object { $_.Result -eq "Skipped" }).Count
+    $failed  = ($cleanupReport | Where-Object { $_.Result -in @("Failed","Timeout") }).Count
+    Write-Host "Completed : $removed" -ForegroundColor Green
+    if ($skipped -gt 0) { Write-Host "Skipped   : $skipped (see Notes column)" -ForegroundColor Yellow }
+    if ($failed  -gt 0) { Write-Host "Failed    : $failed (remove manually via vSphere client)" -ForegroundColor Red }
 
-    $csvPath = ".\SecureBoot_NvramCleanup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $nvramReport | Export-Csv -Path $csvPath -NoTypeInformation
+    $csvPath = ".\SecureBoot_Cleanup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+    $cleanupReport | Export-Csv -Path $csvPath -NoTypeInformation
     Write-Host "Exported to: $csvPath" -ForegroundColor Green
     return
 }
