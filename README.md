@@ -24,6 +24,20 @@ this placeholder PK will not authenticate future Windows Update KEK changes. The
 script detects this condition (`Valid_Other` status) and can enroll the correct
 Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 
+---
+
+> ## <span style="color:red">Important notice regarding support status</span>
+>
+> This script uses the NVRAM rename strategy to resolve 2023 certificate availability in VM UEFI firmware. The approach works by renaming the VM's existing `.nvram` file so that ESXi regenerates it fresh with the updated certificates on next boot.
+>
+> Broadcom previously documented this method in KB 421593. That KB has since been removed from their site with no replacement or explanation. It is not clear whether Broadcom removed it because the method is no longer recommended, because it was superseded by another approach, or for an unrelated reason. The archived version of the KB is linked in the References section below.
+>
+> This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered in practice. However, because the original documentation no longer exists, this approach may be considered unsupported by Broadcom. Use this script with your own judgment and at your own risk.
+>
+> If you encounter issues, the script includes rollback options (`-Rollback`) that restore the original NVRAM file and revert to the pre-remediation snapshot. Retaining snapshots during remediation runs (`-RetainSnapshots`) is strongly recommended until you have validated the results.
+
+---
+
 **References:**
 - [Microsoft KB5068202](https://support.microsoft.com/help/5068202) - AvailableUpdates registry key and monitoring
 - [Microsoft KB5068198](https://support.microsoft.com/help/5068198) - Group Policy deployment (requires Windows Server 2025 ADMX templates)
