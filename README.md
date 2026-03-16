@@ -433,16 +433,20 @@ The recommended workflow when processing VMs in batches is:
 
 2. Validate VMs over several days (check application health, event logs, etc.)
 
-3. Remove snapshots once satisfied
-   .\FixSecureBootBulk.ps1 -VMListCsv .\SecureBoot_Bulk_<timestamp>.csv -CleanupSnapshots
+3. Run all cleanup in one pass once satisfied
+   .\FixSecureBootBulk.ps1 -VMListCsv .\SecureBoot_Bulk_<timestamp>.csv `
+       -CleanupSnapshots -CleanupNvram
 
-4. Remove .nvram_old files (AFTER snapshots are gone)
-   .\FixSecureBootBulk.ps1 -VMListCsv .\SecureBoot_Bulk_<timestamp>.csv -CleanupNvram
+   # If -UpgradeHardware was also used, include -CleanupHWSnapshots
+   .\FixSecureBootBulk.ps1 -VMListCsv .\SecureBoot_Bulk_<timestamp>.csv `
+       -CleanupSnapshots -CleanupHWSnapshots -CleanupNvram
 ```
 
-> **Important:** Always run `-CleanupSnapshots` before `-CleanupNvram`. The snapshot
-> is the rollback mechanism - removing the `.nvram_old` file before the snapshot is
-> gone leaves you without a recovery path.
+The cleanup switches can be combined freely in a single run. When combined, the script enforces a safe internal order regardless of what was specified: Pre-SecureBoot-Fix snapshots are removed first (children), then Pre-HWUpgrade snapshots (parents), then `.nvram_old` files. A single confirmation prompt covers all operations and results are written to one combined CSV (`SecureBoot_Cleanup_<timestamp>.csv`).
+
+Before removing any snapshot, the script checks for non-managed child snapshots (snapshots not created by this script). If found, that snapshot is skipped with a warning and logged in the Notes column. Non-managed children must be removed manually in vSphere Client before re-running cleanup. Pre-SecureBoot-Fix child snapshots under a Pre-HWUpgrade parent are handled automatically when both `-CleanupSnapshots` and `-CleanupHWSnapshots` are specified.
+
+If only `-CleanupNvram` is run while Pre-SecureBoot-Fix snapshots still exist on a VM, the script logs a warning noting that no rollback path will remain, but does not block the deletion.
 
 ---
 
@@ -483,8 +487,7 @@ The script writes a timestamped CSV to the current directory after each run:
 | Mode | Output file |
 |------|------------|
 | Main remediation | `SecureBoot_Bulk_<timestamp>.csv` |
-| Snapshot cleanup | `SecureBoot_SnapshotCleanup_<timestamp>.csv` |
-| NVRAM cleanup | `SecureBoot_NvramCleanup_<timestamp>.csv` |
+| Cleanup (any combination of -CleanupSnapshots, -CleanupHWSnapshots, -CleanupNvram) | `SecureBoot_Cleanup_<timestamp>.csv` |
 | Rollback | `SecureBoot_Rollback_<timestamp>.csv` |
 
 The main remediation CSV includes these columns:
@@ -716,7 +719,7 @@ Once the upgrade is verified stable, remove the `Pre-HWUpgrade*` snapshots:
 .\FixSecureBootBulk.ps1 -VMName "vm01","vm02" -CleanupHWSnapshots
 ```
 
-Output is written to `SecureBoot_HWSnapshotCleanup_<timestamp>.csv`.
+Output is written to `SecureBoot_Cleanup_<timestamp>.csv`.
 
 ### Combined with remediation
 
