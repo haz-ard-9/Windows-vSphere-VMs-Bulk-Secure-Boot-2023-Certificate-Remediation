@@ -233,6 +233,10 @@ $cred = Get-Credential  # Admin account with guest OS access
 # Run unattended without the datastore space confirmation prompt
 .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
     -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -Confirm
+
+# Process co-dependent VMs with a delay between each to allow services to start
+.\FixSecureBootBulk.ps1 -VMName "AppDB01","AppServer01" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -InterVMDelay 120
 ```
 
 ### Using a CSV file for batch processing
@@ -273,7 +277,7 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `-VMName` | `string[]` | One or more VM display names. Accepts wildcards. |
+| `-VMName` | `string[]` | One or more VM display names. Accepts wildcards. VMs are processed in the order provided. |
 | `-VMListCsv` | `string` | Path to a CSV file with a `VMName` column. |
 | `-GuestCredential` | `PSCredential` | Admin credential for guest OS access. Required for main mode. |
 | `-NoSnapshot` | `switch` | Skip snapshot creation. Cannot be combined with `-RetainSnapshots`. |
@@ -285,6 +289,7 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-PKDerPath` | `string` | Path to `WindowsOEMDevicesPK.der`. When provided, enrolls the Windows OEM Devices Platform Key on any VM where the PK is NULL, invalid, or an ESXi-generated placeholder (`Valid_Other`). See [Preparing for PK Remediation](#preparing-for-pk-remediation). |
 | `-KEKDerPath` | `string` | Path to the Microsoft KEK 2K CA 2023 certificate in DER format. Optional - only needed if KEK 2023 is absent after NVRAM regeneration, which should not occur on ESXi 8.0.2+. |
 | `-WaitSeconds` | `int` | Seconds to wait after reboot before polling for VMware Tools. Default: `90`. |
+| `-InterVMDelay` | `int` | Seconds to wait between processing each VM. Default: `0`. Use when remediating paired or co-dependent VMs (primary/secondary, database/app server) to allow services to fully start before the next VM is processed. Not applied after the last VM in the batch. |
 | `-IgnoreCertificateWarnings` | `switch` | Sets PowerCLI `InvalidCertificateAction` to `Ignore` for the current session before connecting to vCenter. Only use this if your vCenter uses a self-signed or untrusted certificate. Omitting this flag leaves your existing PowerCLI certificate configuration unchanged. |
 | `-Assess` | `switch` | Read-only assessment mode. No changes are made to any VM. Collects current state for all target VMs and produces a CSV and console summary. See [Assessment Mode](#assessment-mode). Mutually exclusive with all action modes. |
 | `-UpgradeHardware` | `switch` | Upgrades VM hardware version to the latest supported by the host. Can be used standalone (powers off, upgrades, powers on - no cert work) or combined with the main remediation run, where it is inserted between step 2 and step 3. See [Hardware Version Upgrade](#hardware-version-upgrade). |
@@ -618,13 +623,14 @@ The `-Assess` switch runs a read-only inventory pass against all target VMs. No 
 - ESXi host name and version
 - Firmware type (EFI vs BIOS) and Secure Boot enabled state
 - Presence of `.nvram_old` file and `Pre-SecureBoot-Fix` snapshot (indicates a remediation is in progress or pending cleanup)
+- Datastore name, free space, capacity, and estimated snapshot size per VM (see Datastore Space Check below)
 - KEK 2023, DB 2023, and PK status (requires `-GuestCredential`)
 - `UEFICA2023Status`, `AvailableUpdates`, and `UEFICA2023Error` registry values (requires `-GuestCredential`)
 - TPM-WMI event IDs 1808, 1801, 1802, 1803, 1800, 1795 (requires `-GuestCredential`)
 - BitLocker active state (requires `-GuestCredential`)
-- Derived `ActionNeeded` column summarizing what steps remain per VM
+- Derived `ActionNeeded` column summarizing what steps remain per VM, including a `Insufficient datastore space` flag if the space check fails
 
-If `-GuestCredential` is omitted, only hypervisor-level data is collected (hardware version, ESXi host, firmware, Secure Boot state, datastore files, snapshot presence). This is useful for a quick pre-remediation inventory without needing guest credentials.
+If `-GuestCredential` is omitted, only hypervisor-level data is collected (hardware version, ESXi host, firmware, Secure Boot state, datastore files, snapshot presence, and datastore space). This is useful for a quick pre-remediation inventory without needing guest credentials.
 
 ```powershell
 # Hypervisor-level data only
@@ -638,6 +644,28 @@ If `-GuestCredential` is omitted, only hypervisor-level data is collected (hardw
 ```
 
 The assessment CSV is written to `SecureBoot_Assess_<timestamp>.csv` in the current directory.
+
+### Datastore Space Check
+
+Before displaying the confirmation prompt, the script checks the datastore for each target VM and estimates whether there is sufficient space for a snapshot. The same check runs during `-Assess` and is included in the assessment CSV output.
+
+The estimate uses different logic depending on whether the VM already has snapshots:
+
+**VM has existing snapshots**  -  the disks are already in delta-write mode. The estimate is derived from the actual on-disk size of existing delta files (`snapshotData` and `snapshotExtent` entries from `$vmView.LayoutEx.File`), divided by the number of existing snapshots to produce a per-snapshot average. This reflects real observed write activity on the VM rather than a theoretical maximum.
+
+**VM has no existing snapshots**  -  committed disk bytes from `PerDatastoreUsage` are used as a conservative upper bound, since the snapshot could theoretically grow to the full size of the written disk.
+
+**LayoutEx data unavailable**  -  a fixed 2 GB fallback is used. A dedicated yellow `NOTE:` line is printed whenever the fallback is active, regardless of whether a space warning also fires.
+
+In all cases a 16 MB per-disk baseline floor is applied. VMware allocates one 16 MB delta file per virtual disk at snapshot creation time regardless of I/O activity, so no estimate is reported below `16 MB * virtual disk count`. The disk count and applied baseline are noted in the estimate basis string.
+
+A warning is issued when:
+- The estimated snapshot size exceeds 80% of the available free space on the datastore, or
+- The datastore has less than 5 GB free regardless of estimate
+
+Warnings are shown in the pre-run summary, in the `-Assess` console output, and in the `ActionNeeded` and `Notes` columns of both CSVs. The script does not block on a space warning - it is informational and the operator can still proceed.
+
+The assessment CSV includes the following datastore columns: `Datastore`, `DSFreeGB`, `DSCapacityGB`, `SnapshotEstimateGB`, `DSSpaceOK`.
 
 ---
 
