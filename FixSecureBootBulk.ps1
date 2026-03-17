@@ -1397,9 +1397,9 @@ if ($Assess) {
     $assessReport = [System.Collections.Generic.List[PSObject]]::new()
 
     foreach ($vm in $vms) {
-        $vmName = $vm.Name
+        $currentVMName = [string]$vm.Name
         Write-Host "`n$('='*60)" -ForegroundColor White
-        Write-Host "Assessing: $vmName" -ForegroundColor White
+        Write-Host "Assessing: $currentVMName" -ForegroundColor White
         Write-Host "$('='*60)" -ForegroundColor White
 
         $vmView   = $vm | Get-View
@@ -1429,7 +1429,7 @@ if ($Assess) {
         $dsInfo = Get-VMDatastoreSpaceInfo -VMObj $vm
 
         $row = [PSCustomObject]@{
-            VMName           = $vmName
+            VMName           = $currentVMName
             PowerState       = $vm.PowerState
             HWVersion        = $hwVerNum
             HWVersionOK      = ($hwVerNum -ge 21)
@@ -1597,13 +1597,13 @@ if ($isStandaloneUpgrade) {
 
     $hwReport = [System.Collections.Generic.List[PSObject]]::new()
     foreach ($vm in $vms) {
-        $vmName   = $vm.Name
+        $currentVMName   = [string]$vm.Name
         $vmView   = $vm | Get-View
         $hwVerNum = [int](($vmView.Config.Version) -replace 'vmx-', '')
-        Write-Host "`nProcessing: $vmName (current HW version: $hwVerNum)" -ForegroundColor White
+        Write-Host "`nProcessing: $currentVMName (current HW version: $hwVerNum)" -ForegroundColor White
 
         $hwRow = [PSCustomObject]@{
-            VMName          = $vmName
+            VMName          = $currentVMName
             FromVersion     = $hwVerNum
             ToVersion       = ""
             SnapshotCreated = $false
@@ -1946,13 +1946,13 @@ if ($Rollback) {
     $rollbackReport = [System.Collections.Generic.List[PSObject]]::new()
 
     foreach ($vm in $vms) {
-        $vmName = $vm.Name
+        $currentVMName = [string]$vm.Name
         Write-Host "`n$('='*60)" -ForegroundColor White
-        Write-Host "Rolling back: $vmName" -ForegroundColor White
+        Write-Host "Rolling back: $currentVMName" -ForegroundColor White
         Write-Host "$('='*60)" -ForegroundColor White
 
         $row = [PSCustomObject]@{
-            VMName           = $vmName
+            VMName           = $currentVMName
             PoweredOff       = $false
             NVRAMRestored    = $false
             SnapshotReverted = $false
@@ -2003,7 +2003,7 @@ if ($Rollback) {
 
             # Step 4 - Power on
             Write-Host "  [4/4] Powering on..." -ForegroundColor Cyan
-            $vm = Get-VM -Name $vmName
+            $vm = Get-VM -Name $currentVMName
             Start-VM -VM $vm | Out-Null
             if (Wait-VMTools -VM $vm -TimeoutSeconds 300) {
                 $row.PoweredOn = $true
@@ -2024,7 +2024,7 @@ if ($Rollback) {
         } catch {
             $row.Result  = "ERROR"
             $row.Notes  += "Exception: $($_.Exception.Message)"
-            Write-Warning "  Error rolling back $vmName`: $($_.Exception.Message)"
+            Write-Warning "  Error rolling back $currentVMName`: $($_.Exception.Message)"
         }
 
         $rollbackReport.Add($row)
@@ -2162,18 +2162,18 @@ function Backup-BitLockerKeys {
 # MAIN PROCESSING LOOP
 # =============================================================================
 foreach ($vm in $vms) {
-    $vmName      = $vm.Name
+    $currentVMName      = [string]$vm.Name
     $snapCreated = $false
     # Capture timestamp before any changes so event log checks only consider
     # events generated during this run, not from prior runs or reboots.
     $vmRunStart  = (Get-Date).AddSeconds(-5)  # 5s buffer for clock skew
 
     Write-Host "`n$('='*60)" -ForegroundColor White
-    Write-Host "Processing: $vmName" -ForegroundColor White
+    Write-Host "Processing: $currentVMName" -ForegroundColor White
     Write-Host "$('='*60)" -ForegroundColor White
 
     $row = [PSCustomObject]@{
-        VMName              = $vmName
+        VMName              = $currentVMName
         SnapshotCreated     = $false
         BitLockerSkipped    = $false
         BitLockerKeysBacked = $false
@@ -2215,7 +2215,7 @@ foreach ($vm in $vms) {
 
                 if ($tpmData.BitLockerActive) {
                     if (-not $BitLockerBackupShare) {
-                        Write-Warning "  BitLocker ACTIVE on $vmName - SKIPPING."
+                        Write-Warning "  BitLocker ACTIVE on $currentVMName - SKIPPING."
                         Write-Warning "  Provide -BitLockerBackupShare to back up keys and proceed automatically."
                         $row.BitLockerSkipped = $true
                         $row.Notes = "SKIPPED - BitLocker active. Provide -BitLockerBackupShare to process."
@@ -2230,7 +2230,7 @@ foreach ($vm in $vms) {
                     $backupOk = Backup-BitLockerKeys -VMObj $vm -BackupShare $BitLockerBackupShare -Timestamp $blTimestamp
                     $row.BitLockerKeysBacked = $backupOk
                     if (-not $backupOk) {
-                        Write-Warning "  Recovery key backup failed. Skipping $vmName to avoid lockout."
+                        Write-Warning "  Recovery key backup failed. Skipping $currentVMName to avoid lockout."
                         Write-Warning "  Resolve the share access issue and re-run."
                         $row.BitLockerSkipped = $true
                         $row.Notes = "SKIPPED - BitLocker key backup to share failed."
@@ -2374,7 +2374,7 @@ foreach ($vm in $vms) {
                 $upResult = Invoke-VMHardwareUpgrade -VMObj $vm
                 if ($upResult.Upgraded) {
                     $row.HWUpgraded = "$hwVerNum -> $($upResult.ToVersion)"
-                    $vm = Get-VM -Name $vmName
+                    $vm = Get-VM -Name $currentVMName
                 } else {
                     $row.HWUpgraded = "FAILED"
                     $row.Notes += "Hardware upgrade failed: $($upResult.Notes) "
@@ -2400,7 +2400,7 @@ foreach ($vm in $vms) {
         # ------------------------------------------------------------------
         Write-Host "  [4/9] Powering on (ESXi regenerates NVRAM with 2023 certs)..." -ForegroundColor Cyan
         Start-VM -VM $vm | Out-Null
-        $vm = Get-VM -Name $vmName
+        $vm = Get-VM -Name $currentVMName
         if (-not (Wait-VMTools -VM $vm -TimeoutSeconds 300)) {
             $row.Notes          += "Tools timeout after NVRAM boot. "
             $row.SnapshotRetained = $snapCreated
@@ -2448,7 +2448,7 @@ foreach ($vm in $vms) {
         Write-Host "  [6/9] Rebooting..." -ForegroundColor Cyan
         Restart-VMGuest -VM $vm -Confirm:$false | Out-Null
         Start-Sleep -Seconds $WaitSeconds
-        $vm = Get-VM -Name $vmName
+        $vm = Get-VM -Name $currentVMName
         if (-not (Wait-VMTools -VM $vm -TimeoutSeconds 300)) {
             $row.Notes          += "Tools timeout after reboot. "
             $row.SnapshotRetained = $snapCreated
@@ -2539,7 +2539,7 @@ foreach ($vm in $vms) {
             Write-Host "  [7b/9] Extra reboot required (Event $( if ($verifyData.Evt1801 -eq 'True') {'1801'} else {'1800'} ) detected) - rebooting and re-verifying..." -ForegroundColor Yellow
             Restart-VMGuest -VM $vm -Confirm:$false | Out-Null
             Start-Sleep -Seconds $WaitSeconds
-            $vm = Get-VM -Name $vmName
+            $vm = Get-VM -Name $currentVMName
             if (-not (Wait-VMTools -VM $vm -TimeoutSeconds 300)) {
                 $row.Notes += "Tools timeout after 7b extra reboot. "
                 $row.SnapshotRetained = $snapCreated
@@ -2757,7 +2757,7 @@ foreach ($vm in $vms) {
             # [1/5] Set SetupMode VMX option
             Write-Host "  [PK 1/5] Setting UEFI SetupMode VMX option..." -ForegroundColor Cyan
             Set-VMXOption -VMObj $vm -Key "uefi.secureBootMode.overrideOnce" -Value "SetupMode"
-            $optVal = Get-VMXOption -VMObj (Get-VM -Name $vmName) -Key "uefi.secureBootMode.overrideOnce"
+            $optVal = Get-VMXOption -VMObj (Get-VM -Name $currentVMName) -Key "uefi.secureBootMode.overrideOnce"
             if ($optVal -ne "SetupMode") {
                 throw "Failed to set uefi.secureBootMode.overrideOnce - check vCenter permissions."
             }
@@ -2768,7 +2768,7 @@ foreach ($vm in $vms) {
             Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
             Start-Sleep -Seconds 5
             Start-VM -VM $vm | Out-Null
-            $vm = Get-VM -Name $vmName
+            $vm = Get-VM -Name $currentVMName
             if (-not (Wait-VMTools -VM $vm -TimeoutSeconds 300)) {
                 throw "Tools timeout after SetupMode reboot."
             }
@@ -2824,12 +2824,12 @@ foreach ($vm in $vms) {
             Write-Host "  [PK 5/5] Clearing SetupMode, rebooting, and verifying PK..." -ForegroundColor Cyan
             # Clear explicitly - if enrollment failed the option must be cleared
             # before retry to avoid persisting SetupMode unexpectedly
-            Set-VMXOption -VMObj (Get-VM -Name $vmName) -Key "uefi.secureBootMode.overrideOnce" -Value ""
+            Set-VMXOption -VMObj (Get-VM -Name $currentVMName) -Key "uefi.secureBootMode.overrideOnce" -Value ""
             Write-Host "    SetupMode VMX option cleared." -ForegroundColor Gray
 
             Restart-VMGuest -VM $vm -Confirm:$false | Out-Null
             Start-Sleep -Seconds $WaitSeconds
-            $vm = Get-VM -Name $vmName
+            $vm = Get-VM -Name $currentVMName
             if (-not (Wait-VMTools -VM $vm -TimeoutSeconds 300)) {
                 throw "Tools timeout after post-enrollment reboot."
             }
@@ -2889,7 +2889,7 @@ foreach ($vm in $vms) {
         $row.FinalStatus      = "ERROR"
         $row.SnapshotRetained = $snapCreated
         $row.Notes           += "Exception: $($_.Exception.Message)"
-        Write-Warning "  Error processing $vmName`: $($_.Exception.Message)"
+        Write-Warning "  Error processing $currentVMName`: $($_.Exception.Message)"
         if ($snapCreated) {
             Write-Warning "  Snapshot retained for rollback: '$snapshotName'"
         }
