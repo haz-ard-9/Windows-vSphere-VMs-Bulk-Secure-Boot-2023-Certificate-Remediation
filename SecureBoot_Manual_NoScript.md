@@ -11,13 +11,26 @@ For VMware virtual machines, Windows cannot apply this update on its own because
 the certificates live in the VM's NVRAM - a firmware-level file managed by ESXi,
 not by Windows. The process therefore has two distinct phases:
 
-1. **ESXi phase:** Delete the VM's NVRAM file so ESXi regenerates it fresh with
-   the 2023 certificates on next boot. Then enroll a proper Platform Key (PK)
-   via UEFI SetupMode.
+1. **ESXi phase:** Rename the VM's NVRAM file so ESXi regenerates it fresh with
+   the 2023 certificates on next boot. The original file is preserved as
+   `.nvram_old` so rollback is possible if needed. Then enroll a proper
+   Platform Key (PK) via UEFI SetupMode.
 2. **Windows phase:** Set a registry value that tells the Windows Secure Boot
    Update task to write the new 2023 certificates into the UEFI firmware
    variables. Windows handles the KEK, DB, and boot manager updates
    automatically - no manual KEK enrollment is required.
+
+---
+
+> ## Important notice regarding support status
+>
+> This guide includes a step that renames the VM's `.nvram` file to force ESXi to regenerate it fresh with the 2023 KEK certificate on next boot. Broadcom previously documented this approach in [KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) *(archived - Broadcom has removed this KB)*. It is not clear whether Broadcom removed it because the method is no longer recommended, because it was superseded by another approach, or for an unrelated reason.
+>
+> This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered in practice. However, because the original documentation no longer exists, this approach may be considered unsupported by Broadcom. Use this guide with your own judgment and at your own risk.
+>
+> The NVRAM file is **renamed** rather than deleted so that rollback is possible - the original file is preserved as `.nvram_old`. A snapshot is also taken at Step 1 before any changes are made. If you encounter any issues, the Rollback Procedure at the end of this guide will restore the original NVRAM and revert the VM to its pre-change state.
+>
+> **You may be able to skip the NVRAM rename entirely.** If the KEK 2023 certificate is already present in the VM's NVRAM (which is the case for VMs created on ESXi 8.0.2 or later, or VMs that have already had a partial remediation), Steps 4 and 5 are not needed. Run the KEK pre-check below before proceeding.
 
 ### Reference Documentation
 
@@ -85,6 +98,22 @@ on the guest. No `.ps1` script files are required.
 2. Click the **Download raw file** button (down-arrow icon near the top right
    of the file view)
 3. Save the file to your admin workstation (e.g., `C:\Tools\WindowsOEMDevicesPK.der`)
+
+
+---
+
+## KEK Pre-Check (Do This Before Step 4)
+
+Check whether the 2023 KEK certificate is already present in the VM's NVRAM. If it is, skip Steps 4 and 5 entirely and proceed directly to Step 6.
+
+From an elevated PowerShell session on the VM (via RDP or console):
+
+```powershell
+[System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI kek).Bytes) -match 'Microsoft Corporation KEK 2K CA 2023'
+```
+
+- `True` - KEK 2023 is already present. **Skip Steps 4 and 5.** Go directly to Step 6 to trigger the cert update task.
+- `False` - KEK 2023 is missing. Complete Steps 4 and 5 to rename the NVRAM and allow ESXi to regenerate it.
 
 ---
 
@@ -674,9 +703,13 @@ are satisfied there are no issues:
 
 ---
 
-## Step 14 - Delete the .nvram_old File (After Snapshot Removed)
+## Step 14 - Remove the .nvram_old File (After Snapshot Removed)
 
-Once the snapshot has been removed and you have no intention of rolling back:
+Once the snapshot has been removed and you are satisfied the VM is operating
+correctly with no intention of rolling back, the `.nvram_old` file can be
+cleaned up from the datastore. This file was preserved specifically to allow
+rollback - do not remove it until the snapshot is gone and you are confident
+the remediation is complete.
 
 1. In vSphere Client, click **Storage**
 2. Select the datastore, click the **Files** tab
