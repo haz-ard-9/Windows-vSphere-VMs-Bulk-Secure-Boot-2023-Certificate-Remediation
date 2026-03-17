@@ -36,6 +36,47 @@ entirely before touching DC2 (the PDC Emulator holder).
 
 ---
 
+> ## Important notice regarding support status
+>
+> This guide includes a step that renames the VM's `.nvram` file to force ESXi to regenerate it fresh with the 2023 KEK certificate on next boot. Broadcom previously documented this approach in [KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) *(archived - Broadcom has removed this KB)*. It is not clear whether Broadcom removed it because the method is no longer recommended, because it was superseded by another approach, or for an unrelated reason.
+>
+> This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered in practice. However, because the original documentation no longer exists, this approach may be considered unsupported by Broadcom. Use this guide with your own judgment and at your own risk.
+>
+> The NVRAM file is **renamed** rather than deleted so that rollback is possible - the original file is preserved as `.nvram_old`. A snapshot is also taken before any changes are made. If you encounter any issues, reverting to the snapshot will restore the original NVRAM and return the DC to its pre-change state.
+>
+> **You may be able to skip the NVRAM rename entirely.** If the KEK 2023 certificate is already present in the VM's NVRAM (which is the case for VMs created on ESXi 8.0.2 or later, or VMs that have already had a partial remediation), the rename is not needed. Check before proceeding - see the KEK Pre-Check step below.
+
+---
+
+## KEK Pre-Check (Do This First)
+
+Before touching the NVRAM, check whether the 2023 KEK certificate is already present. If it is, skip straight to [Phase 1, Step 5](#phase-1-dc1-secondary-domain-controller) - the NVRAM rename and power cycle steps are not needed.
+
+**Option A - PowerShell on the VM** (requires console or RDP access):
+
+Open an elevated PowerShell session on the DC and run:
+
+```powershell
+[System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI kek).Bytes) -match 'Microsoft Corporation KEK 2K CA 2023'
+```
+
+- `True` - KEK 2023 is present. **Skip the NVRAM rename (Steps 3-4).** Proceed directly to Step 5 to trigger the cert update task.
+- `False` - KEK 2023 is missing. Proceed with the full procedure including the NVRAM rename.
+
+**Option B - PowerCLI from your admin workstation** (no console access needed):
+
+```powershell
+$cred = Get-Credential
+$out  = Invoke-VMScript -VM "DC1" -ScriptText {
+    [System.Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI kek).Bytes) -match 'Microsoft Corporation KEK 2K CA 2023'
+} -ScriptType Powershell -GuestCredential $cred
+$out.ScriptOutput.Trim()
+```
+
+> **Note:** `Invoke-VMScript` may fail on domain controllers due to UAC restrictions depending on your environment. If it does, use Option A from the VM console instead.
+
+---
+
 ## Pre-Work (Complete Before Any Maintenance Window)
 
 ### 1. Verify replication health
