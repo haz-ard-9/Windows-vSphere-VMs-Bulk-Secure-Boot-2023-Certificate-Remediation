@@ -1,7 +1,8 @@
 # FixSecureBootBulk.ps1
 
 A PowerShell script for bulk remediating the Microsoft Secure Boot 2023 certificate
-issue on Windows Server VMs running in VMware vSphere 8.
+issue on Windows Server VMs running in VMware vSphere 8. Supports Windows
+Server 2016, 2019, 2022, and 2025, as well as Windows 10 and 11.
 
 ---
 
@@ -81,7 +82,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 - VMs reporting `toolsNotInstalled`, `toolsNotRunning`, or `toolsOld` should be remediated before running the script
 
 ### Guest OS
-- **Windows 10, Windows 11, and Windows Server 2016, 2019, or 2022**
+- **Windows 10, Windows 11, and Windows Server 2016, 2019, 2022, or 2025**
 - VMs must be configured with **EFI firmware** and **Secure Boot enabled** at the hypervisor level
 - Domain, Server, or Local admin credentials with rights to run scheduled tasks and modify HKLM registry keys on the specified Windows VMs
 
