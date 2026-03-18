@@ -870,6 +870,16 @@ Increase the Tools wait timeout with `-WaitSeconds`:
 .\FixSecureBootBulk.ps1 -VMName "slow-vm" -GuestCredential $cred -WaitSeconds 180
 ```
 
+This applies to any reboot in the sequence, but is most commonly encountered at
+step `[PK 2/5]` where the VM reboots into SetupMode for PK enrollment. If your
+VM boots slowly, Tools may not come up within the default 90 seconds. The script
+will report "VM is back online" once Tools responds - if this takes longer than
+`-WaitSeconds`, the script moves on before the guest is fully ready and the
+subsequent `Copy-VMGuestFile` at `[PK 3/5]` fails with a guest OS or file copy
+error. If you see cert update steps 1-7 complete successfully but `[PK 3/5]`
+fails with a guest operation error, a slow boot at the SetupMode reboot is the
+most likely cause. Increasing `-WaitSeconds` to 120-180 resolves this.
+
 ### VMware Tools not installed or not running
 
 `Invoke-VMScript` will fail immediately if VMware Tools is not installed, not
