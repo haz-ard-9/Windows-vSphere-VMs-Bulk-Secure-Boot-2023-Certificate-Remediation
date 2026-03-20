@@ -327,12 +327,18 @@ Reg Error key    : Not present (no error)
 
 | Event ID | Meaning |
 |----------|---------|
-| **1808** | Success - all certificates and boot manager applied to firmware |
+| **1036** | Success - Windows UEFI CA 2023 added to Secure Boot DB |
+| **1043** | Success - KEK 2K CA 2023 applied |
+| **1044** | Success - Microsoft Option ROM UEFI CA 2023 added to DB |
+| **1045** | Success - Microsoft UEFI CA 2023 added to DB |
+| **1795** | ERROR - firmware returned error on variable write; contact OEM for firmware update |
+| **1797** | ERROR - boot manager update failed; check firmware |
+| **1799** | Success - boot manager signed by Windows UEFI CA 2023 applied |
+| **1800** | Warning - reboot required before Secure Boot update can proceed |
 | **1801** | ERROR - certificates updated but not yet applied to firmware; an additional reboot may be required |
 | **1802** | ERROR - update blocked by known firmware issue; contact OEM for firmware update |
 | **1803** | ERROR - no PK-signed KEK found; PK remediation (Step 9) required |
-| **1800** | Warning - reboot required before Secure Boot update can proceed |
-| **1795** | ERROR - firmware returned error on variable write; contact OEM for firmware update |
+| **1808** | Success - all certificates and boot manager applied to firmware (definitive success) |
 
 Event 1808 may not appear until an extra reboot after the update task completes. Absence of 1808 alone is not a failure indicator - use `UEFICA2023Status = Updated` as the primary completion signal.
 
