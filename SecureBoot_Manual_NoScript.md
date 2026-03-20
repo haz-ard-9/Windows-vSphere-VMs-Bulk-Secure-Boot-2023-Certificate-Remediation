@@ -43,6 +43,7 @@ not by Windows. The process therefore has two distinct phases:
 | Microsoft | [Secure Boot Playbook for Certificates Expiring in 2026](https://techcommunity.microsoft.com/blog/windows-itpro-blog/secure-boot-playbook-for-certificates-expiring-in-2026/4469235) |
 | Microsoft | [Windows Server Secure Boot Playbook](https://techcommunity.microsoft.com/blog/windowsservernewsandbestpractices/windows-server-secure-boot-playbook-for-certificates-expiring-in-2026/4495789) |
 | Microsoft | [Secure Boot DB and DBX Variable Update Events](https://support.microsoft.com/en-us/topic/secure-boot-db-and-dbx-variable-update-events) |
+| Microsoft | [KB5085046 - Secure Boot Troubleshooting Guide](https://support.microsoft.com/en-us/kb/5085046) |
 
 ### Success and Failure Indicators
 
@@ -54,12 +55,19 @@ investigate failures:
 | `UEFICA2023Status = Updated` | `HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing` | All certificates applied successfully |
 | `UEFICA2023Status = InProgress` | Same path | Process is running - wait and check again |
 | `UEFICA2023Error` key exists | Same path | An error occurred - value contains error code |
-| Event ID **1808** (TPM-WMI) | Windows Event Viewer → System log | Success - all certificates and boot manager applied to firmware |
-| Event ID **1801** (TPM-WMI) | Windows Event Viewer → System log | ERROR - certificates updated but not yet applied to firmware; device still needs attention |
-| Event ID **1800** (TPM-WMI) | Windows Event Viewer → System log | Warning - reboot required before Secure Boot update can proceed |
-| Event ID **1802** (TPM-WMI) | Windows Event Viewer → System log | ERROR - update blocked by known firmware issue; contact OEM for firmware update |
-| Event ID **1795** (TPM-WMI) | Windows Event Viewer → System log | ERROR - firmware returned error on Secure Boot variable write; contact OEM |
-| Event ID **1803** (TPM-WMI) | Windows Event Viewer → System log | ERROR - no PK-signed KEK found; PK remediation (Step 12) is required |
+| `UEFICA2023ErrorEvent` key exists | Same path | Event ID associated with the error condition |
+| Event ID **1036** (TPM-WMI) | Windows Event Viewer -> System log | Success - Windows UEFI CA 2023 added to Secure Boot DB |
+| Event ID **1043** (TPM-WMI) | Windows Event Viewer -> System log | Success - KEK 2K CA 2023 applied |
+| Event ID **1044** (TPM-WMI) | Windows Event Viewer -> System log | Success - Microsoft Option ROM UEFI CA 2023 added to DB |
+| Event ID **1045** (TPM-WMI) | Windows Event Viewer -> System log | Success - Microsoft UEFI CA 2023 added to DB |
+| Event ID **1795** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - firmware returned error on Secure Boot variable write; contact OEM |
+| Event ID **1797** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - boot manager update failed; check firmware |
+| Event ID **1799** (TPM-WMI) | Windows Event Viewer -> System log | Success - boot manager signed by Windows UEFI CA 2023 applied |
+| Event ID **1800** (TPM-WMI) | Windows Event Viewer -> System log | Warning - reboot required before Secure Boot update can proceed |
+| Event ID **1801** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - certificates updated but not yet applied to firmware; device still needs attention |
+| Event ID **1802** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - update blocked by known firmware issue; contact OEM for firmware update |
+| Event ID **1803** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - no PK-signed KEK found; PK remediation (Step 12) is required |
+| Event ID **1808** (TPM-WMI) | Windows Event Viewer -> System log | Success - all certificates and boot manager applied to firmware (definitive success) |
 
 **How to find these events in Event Viewer:**
 1. Press **Win + R**, type `eventvwr.msc`, click **OK**
