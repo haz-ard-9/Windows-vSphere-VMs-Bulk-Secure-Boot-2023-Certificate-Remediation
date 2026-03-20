@@ -1024,6 +1024,8 @@ $r["AvailableUpdates"]  = "0x$("{0:X4}" -f (Get-ItemPropertyValue -Path $regPath
 $errVal = Get-ItemPropertyValue -Path $svcPath -Name "UEFICA2023Error" -EA SilentlyContinue
 $r["UEFICA2023ErrorExists"] = ($null -ne $errVal).ToString()
 $r["UEFICA2023ErrorValue"]  = if ($null -ne $errVal) { $errVal } else { "" }
+$errEvt = Get-ItemPropertyValue -Path $svcPath -Name "UEFICA2023ErrorEvent" -EA SilentlyContinue
+$r["UEFICA2023ErrorEvent"]  = if ($null -ne $errEvt) { $errEvt } else { "" }
 
 # Cert presence via ASCII scan
 try {
@@ -1046,10 +1048,10 @@ try {
     }
 } catch { $r["PK_Status"] = "CheckFailed" }
 
-# Events
-$evts = @{ Evt1808=$false; Evt1801=$false; Evt1802=$false; Evt1803=$false; Evt1800=$false; Evt1795=$false }
+# Events (KB5016061 + KB5085046)
+$evts = @{ Evt1036=$false; Evt1043=$false; Evt1044=$false; Evt1045=$false; Evt1795=$false; Evt1797=$false; Evt1799=$false; Evt1800=$false; Evt1801=$false; Evt1802=$false; Evt1803=$false; Evt1808=$false }
 try {
-    $events = Get-WinEvent -FilterHashtable @{ LogName="System"; ProviderName="Microsoft-Windows-TPM-WMI"; Id=@(1795,1800,1801,1802,1803,1808) } -MaxEvents 50 -EA Stop
+    $events = Get-WinEvent -FilterHashtable @{ LogName="System"; ProviderName="Microsoft-Windows-TPM-WMI"; Id=@(1036,1043,1044,1045,1795,1797,1799,1800,1801,1802,1803,1808) } -MaxEvents 100 -EA Stop
     foreach ($e in $events) { $evts["Evt$($e.Id)"] = $true }
 } catch {}
 foreach ($k in $evts.Keys) { $r[$k] = $evts[$k].ToString() }
@@ -1192,10 +1194,14 @@ $auRaw = Get-ItemPropertyValue -Path $regPath -Name "AvailableUpdates" -EA Silen
 if ($null -ne $auRaw) { $auHex = ("0x{0:X4}" -f [int]$auRaw) } else { $auHex = "not found" }
 $errExists = "False"
 $errValue  = ""
+$errEvtVal = ""
 $svcProps = Get-ItemProperty -Path $svcPath -EA SilentlyContinue
 if ($svcProps -and $null -ne $svcProps.UEFICA2023Error) {
     $errExists = "True"
     $errValue  = [string]$svcProps.UEFICA2023Error
+}
+if ($svcProps -and $null -ne $svcProps.UEFICA2023ErrorEvent) {
+    $errEvtVal = [string]$svcProps.UEFICA2023ErrorEvent
 }
 
 $kek = "CheckFailed"
@@ -1209,20 +1215,27 @@ try {
     if ($dbBytes) { $db = ([System.Text.Encoding]::ASCII.GetString($dbBytes) -match "Windows UEFI CA 2023").ToString() }
 } catch {}
 
-$e1808 = "False"; $e1801 = "False"; $e1802 = "False"
-$e1803 = "False"; $e1800 = "False"; $e1795 = "False"
+$e1036 = "False"; $e1043 = "False"; $e1044 = "False"; $e1045 = "False"
+$e1795 = "False"; $e1797 = "False"; $e1799 = "False"; $e1800 = "False"
+$e1801 = "False"; $e1802 = "False"; $e1803 = "False"; $e1808 = "False"
 try {
     $startTime = [datetime]"VERIFY_START_TIME"
     $evts = Get-WinEvent -LogName "System" -EA Stop |
-        Where-Object { $_.ProviderName -eq "Microsoft-Windows-TPM-WMI" -and $_.Id -in @(1795,1800,1801,1802,1803,1808) -and $_.TimeCreated -ge $startTime } |
-        Select-Object -First 50
+        Where-Object { $_.ProviderName -eq "Microsoft-Windows-TPM-WMI" -and $_.Id -in @(1036,1043,1044,1045,1795,1797,1799,1800,1801,1802,1803,1808) -and $_.TimeCreated -ge $startTime } |
+        Select-Object -First 100
     foreach ($e in $evts) {
-        if ($e.Id -eq 1808) { $e1808 = "True" }
+        if ($e.Id -eq 1036) { $e1036 = "True" }
+        if ($e.Id -eq 1043) { $e1043 = "True" }
+        if ($e.Id -eq 1044) { $e1044 = "True" }
+        if ($e.Id -eq 1045) { $e1045 = "True" }
+        if ($e.Id -eq 1795) { $e1795 = "True" }
+        if ($e.Id -eq 1797) { $e1797 = "True" }
+        if ($e.Id -eq 1799) { $e1799 = "True" }
+        if ($e.Id -eq 1800) { $e1800 = "True" }
         if ($e.Id -eq 1801) { $e1801 = "True" }
         if ($e.Id -eq 1802) { $e1802 = "True" }
         if ($e.Id -eq 1803) { $e1803 = "True" }
-        if ($e.Id -eq 1800) { $e1800 = "True" }
-        if ($e.Id -eq 1795) { $e1795 = "True" }
+        if ($e.Id -eq 1808) { $e1808 = "True" }
     }
 } catch {}
 
@@ -1231,14 +1244,21 @@ Write-Output "Servicing_Status=$svcStatus"
 Write-Output "AvailableUpdates=$auHex"
 Write-Output "UEFICA2023ErrorExists=$errExists"
 Write-Output "UEFICA2023ErrorValue=$errValue"
+Write-Output "UEFICA2023ErrorEvent=$errEvtVal"
 Write-Output "KEK_2023=$kek"
 Write-Output "DB_2023=$db"
-Write-Output "Evt1808=$e1808"
+Write-Output "Evt1036=$e1036"
+Write-Output "Evt1043=$e1043"
+Write-Output "Evt1044=$e1044"
+Write-Output "Evt1045=$e1045"
+Write-Output "Evt1795=$e1795"
+Write-Output "Evt1797=$e1797"
+Write-Output "Evt1799=$e1799"
+Write-Output "Evt1800=$e1800"
 Write-Output "Evt1801=$e1801"
 Write-Output "Evt1802=$e1802"
 Write-Output "Evt1803=$e1803"
-Write-Output "Evt1800=$e1800"
-Write-Output "Evt1795=$e1795"
+Write-Output "Evt1808=$e1808"
 Write-Output "VERIFY_END"
 '@
 
@@ -1451,12 +1471,18 @@ if ($Assess) {
             UEFICA2023Status = "Not collected"
             AvailableUpdates = "Not collected"
             UEFICA2023Error  = "Not collected"
-            Evt1808          = "Not collected"
+            Evt1036          = "Not collected"
+            Evt1043          = "Not collected"
+            Evt1044          = "Not collected"
+            Evt1045          = "Not collected"
+            Evt1795          = "Not collected"
+            Evt1797          = "Not collected"
+            Evt1799          = "Not collected"
+            Evt1800          = "Not collected"
             Evt1801          = "Not collected"
             Evt1802          = "Not collected"
             Evt1803          = "Not collected"
-            Evt1800          = "Not collected"
-            Evt1795          = "Not collected"
+            Evt1808          = "Not collected"
             BitLockerActive  = "Not collected"
             ActionNeeded     = ""
             Notes            = ""
@@ -1489,6 +1515,7 @@ if ($Assess) {
                 $aOut  = Invoke-VMScript -VM $vm -ScriptText $assessGuestScript `
                     -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
                 $aData = $aOut.ScriptOutput.Trim() | ConvertFrom-Json
+                if ($null -eq $aData) { throw "Guest script returned no output - check VMware Tools version and guest PowerShell execution policy" }
 
                 $row.KEK_2023         = $aData.KEK_2023
                 $row.DB_2023          = $aData.DB_2023
@@ -1496,15 +1523,19 @@ if ($Assess) {
                 $row.UEFICA2023Status = if ($aData.UEFICA2023Status) { $aData.UEFICA2023Status } else { "not found" }
                 $row.AvailableUpdates = $aData.AvailableUpdates
                 $row.UEFICA2023Error  = if ($aData.UEFICA2023ErrorExists -eq "True") { "ERROR ($($aData.UEFICA2023ErrorValue))" } else { "" }
-                $row.Evt1808 = $aData.Evt1808; $row.Evt1801 = $aData.Evt1801
-                $row.Evt1802 = $aData.Evt1802; $row.Evt1803 = $aData.Evt1803
-                $row.Evt1800 = $aData.Evt1800; $row.Evt1795 = $aData.Evt1795
+                if ($aData.UEFICA2023ErrorEvent) { $row.Notes += "UEFICA2023ErrorEvent: $($aData.UEFICA2023ErrorEvent). " }
+                $row.Evt1036 = $aData.Evt1036; $row.Evt1043 = $aData.Evt1043
+                $row.Evt1044 = $aData.Evt1044; $row.Evt1045 = $aData.Evt1045
+                $row.Evt1795 = $aData.Evt1795; $row.Evt1797 = $aData.Evt1797
+                $row.Evt1799 = $aData.Evt1799; $row.Evt1800 = $aData.Evt1800
+                $row.Evt1801 = $aData.Evt1801; $row.Evt1802 = $aData.Evt1802
+                $row.Evt1803 = $aData.Evt1803; $row.Evt1808 = $aData.Evt1808
                 $row.BitLockerActive = $aData.BitLockerActive
 
                 Write-Host "  UEFICA2023Status : $($row.UEFICA2023Status)" -ForegroundColor $(switch ($row.UEFICA2023Status.ToLower()) { "updated" {"Green"} "in progress" {"Yellow"} default {"Red"} })
                 Write-Host "  AvailableUpdates : $($row.AvailableUpdates)"
                 Write-Host "  KEK 2023 : $($row.KEK_2023) | DB 2023: $($row.DB_2023) | PK: $($row.PK_Status)"
-                Write-Host "  Evt1808  : $($row.Evt1808) | Evt1801: $($row.Evt1801) | Evt1795: $($row.Evt1795)"
+                Write-Host "  Evt1808  : $($row.Evt1808) | Evt1799: $($row.Evt1799) | Evt1801: $($row.Evt1801) | Evt1803: $($row.Evt1803) | Evt1795: $($row.Evt1795)"
                 if ($row.UEFICA2023Error) { Write-Host "  RegError : $($row.UEFICA2023Error)" -ForegroundColor Red }
                 if ($aData.BitLockerActive -eq "True") { $row.Notes += "BitLocker active. " }
             } catch {
@@ -1532,8 +1563,9 @@ if ($Assess) {
             }
             if ($row.PK_Status -in @("Valid_Other","Invalid_NULL"))          { $actions.Add("Enroll PK") }
             if ($row.UEFICA2023Error)                                         { $actions.Add("Investigate reg error") }
-            if ($row.Evt1802 -eq "True")                                      { $actions.Add("OEM firmware update (Evt 1802)") }
-            if ($row.Evt1795 -eq "True")                                      { $actions.Add("OEM firmware update (Evt 1795)") }
+            if ($row.Evt1802 -eq "True")                                          { $actions.Add("OEM firmware update (Evt 1802)") }
+            if ($row.Evt1795 -eq "True")                                          { $actions.Add("OEM firmware update (Evt 1795)") }
+            if ($row.Evt1797 -eq "True")                                          { $actions.Add("Boot manager update failed (Evt 1797) - check firmware") }
             if ($actions.Count -eq 0 -and $row.UEFICA2023Status -eq "updated") { $actions.Add("None - complete") }
             elseif ($actions.Count -eq 0 -and $row.UEFICA2023Status -eq "Not collected") { $actions.Add("Run with -GuestCredential for full assessment") }
         }
@@ -2187,12 +2219,18 @@ foreach ($vm in $vms) {
         DB_2023             = "Not checked"
         FinalStatus         = "Not checked"
         UEFICA2023Error     = ""
-        Evt1808             = ""
+        Evt1036             = ""
+        Evt1043             = ""
+        Evt1044             = ""
+        Evt1045             = ""
+        Evt1795             = ""
+        Evt1797             = ""
+        Evt1799             = ""
+        Evt1800             = ""
         Evt1801             = ""
         Evt1802             = ""
         Evt1803             = ""
-        Evt1800             = ""
-        Evt1795             = ""
+        Evt1808             = ""
         PK_Status           = "Not checked"
         PKEnrolled          = $false
         PKRemediated        = $false
@@ -2508,16 +2546,25 @@ foreach ($vm in $vms) {
         }
 
         # Populate event log results
-        $row.Evt1808 = $verifyData.Evt1808
+        $row.Evt1036 = $verifyData.Evt1036
+        $row.Evt1043 = $verifyData.Evt1043
+        $row.Evt1044 = $verifyData.Evt1044
+        $row.Evt1045 = $verifyData.Evt1045
+        $row.Evt1795 = $verifyData.Evt1795
+        $row.Evt1797 = $verifyData.Evt1797
+        $row.Evt1799 = $verifyData.Evt1799
+        $row.Evt1800 = $verifyData.Evt1800
         $row.Evt1801 = $verifyData.Evt1801
         $row.Evt1802 = $verifyData.Evt1802
         $row.Evt1803 = $verifyData.Evt1803
-        $row.Evt1800 = $verifyData.Evt1800
-        $row.Evt1795 = $verifyData.Evt1795
+        $row.Evt1808 = $verifyData.Evt1808
 
         # Flag persistent error events in Notes. 1801 and 1800 are handled by
         # step 7b which reboots and re-checks before adding a Note.
         # 1808 absence is not flagged - may not fire until after an extra reboot.
+        if ($verifyData.Evt1797 -eq "True") {
+            $row.Notes += "Event 1797: boot manager update failed - check firmware. "
+        }
         if ($verifyData.Evt1802 -eq "True") {
             $row.Notes += "Event 1802: update blocked by known firmware issue - contact OEM for firmware update. "
         }
@@ -2578,12 +2625,18 @@ foreach ($vm in $vms) {
                 } else {
                     "Unknown"
                 }
-                $row.Evt1808 = $verifyData.Evt1808
-                $row.Evt1801 = $verifyData.Evt1801
+                $row.Evt1036 = $verifyData.Evt1036
+                $row.Evt1043 = $verifyData.Evt1043
+                $row.Evt1044 = $verifyData.Evt1044
+                $row.Evt1045 = $verifyData.Evt1045
+                $row.Evt1795 = $verifyData.Evt1795
+                $row.Evt1797 = $verifyData.Evt1797
+                $row.Evt1799 = $verifyData.Evt1799
                 $row.Evt1800 = $verifyData.Evt1800
+                $row.Evt1801 = $verifyData.Evt1801
                 $row.Evt1802 = $verifyData.Evt1802
                 $row.Evt1803 = $verifyData.Evt1803
-                $row.Evt1795 = $verifyData.Evt1795
+                $row.Evt1808 = $verifyData.Evt1808
                 if ($verifyData.UEFICA2023ErrorExists -eq "True") {
                     $row.UEFICA2023Error = "ERROR ($($verifyData.UEFICA2023ErrorValue))"
                 }
@@ -2633,6 +2686,7 @@ foreach ($vm in $vms) {
             $row.FinalStatus, $row.KEK_2023, $row.DB_2023,
             $verifyData.AvailableUpdates, $row.Evt1808,
             $(if ($row.UEFICA2023Error) { " | RegError: $($row.UEFICA2023Error)" } else { "" })) -ForegroundColor $color
+        if ($verifyData.Evt1797 -eq "True") { Write-Host "    Event 1797: boot manager update failed - check firmware." -ForegroundColor Red }
         if ($verifyData.Evt1802 -eq "True") { Write-Host "    Event 1802: update blocked by known firmware issue - contact OEM." -ForegroundColor Red }
         if ($verifyData.Evt1803 -eq "True") { Write-Host "    Event 1803: no PK-signed KEK found - PK remediation required." -ForegroundColor Yellow }
         if ($verifyData.Evt1795 -eq "True") { Write-Host "    Event 1795: firmware error on variable write - contact OEM." -ForegroundColor Red }
@@ -2914,7 +2968,8 @@ Write-Host "SUMMARY" -ForegroundColor White
 Write-Host "$('='*60)" -ForegroundColor White
 $report | Format-Table VMName, SnapshotCreated, BitLockerKeysBacked, BitLockerSuspended,
     NVRAMRenamed, HWUpgraded, KEK_AfterNVRAM, UpdateTriggered, KEK_2023, DB_2023,
-    FinalStatus, UEFICA2023Error, Evt1808, Evt1801, Evt1802, Evt1803, Evt1800, Evt1795,
+    FinalStatus, UEFICA2023Error, Evt1036, Evt1043, Evt1044, Evt1045,
+    Evt1795, Evt1797, Evt1799, Evt1800, Evt1801, Evt1802, Evt1803, Evt1808,
     PK_Status, PKEnrolled, PKRemediated, SnapshotRetained, Notes -AutoSize
 
 $csvPath = ".\SecureBoot_Bulk_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
