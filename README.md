@@ -42,6 +42,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 **References:**
 - [Microsoft KB5068202](https://support.microsoft.com/help/5068202) - AvailableUpdates registry key and monitoring
 - [Microsoft KB5068198](https://support.microsoft.com/help/5068198) - Group Policy deployment (requires Windows Server 2025 ADMX templates)
+- [Microsoft KB5085046](https://support.microsoft.com/en-us/kb/5085046) - Secure Boot troubleshooting guide; AvailableUpdates bit progression, event IDs, and failure scenarios (published March 2026)
 - [Broadcom KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) - NVRAM rename procedure for missing KEK CA 2023 on Windows VMs *(Broadcom has removed this KB; link points to archive.org)*
 - [Broadcom KB 423919](https://knowledge.broadcom.com/external/article/423919) - Manual Update of the Secure Boot Platform Key in Virtual Machines
 
@@ -337,7 +338,7 @@ For each VM in the main remediation mode, the script performs the following step
 [6/9] Reboot VM  (skipped if cert update already complete)
       Trigger Secure-Boot-Update task again (completes Boot Manager update)
 [7/9] Verify: Servicing Status = "Updated", KEK 2023 = True, DB 2023 = True
-      Also reads TPM-WMI event log (1808, 1801, 1802, 1803, 1800, 1795) per KB 5016061
+      Also reads TPM-WMI event log (1036, 1043, 1044, 1045, 1795, 1797, 1799, 1800, 1801, 1802, 1803, 1808) per KB5016061 and KB5085046
 [7b/9] Extra reboot (only if Event 1801 or 1800 present AND Event 1808 absent)
        Reboots VM, triggers task, re-verifies. If 1801 persists after reboot,
        diagnoses cause (1802/1795/registry error/stuck AvailableUpdates).
@@ -396,30 +397,42 @@ tracks progress. Bits clear as each step completes:
 | Value | Meaning |
 |-------|---------|
 | `0x5944` | Starting state - all update steps needed |
-| `0x4100` | KEK/DB certs applied, Boot Manager update pending (after first task run + reboot) |
-| `0x4000` | Fully complete |
+| `0x5904` | Windows UEFI CA 2023 added to DB (bit 0x0040 cleared) |
+| `0x5104` | Microsoft Option ROM UEFI CA 2023 added to DB (bit 0x0800 cleared) |
+| `0x4104` | Microsoft UEFI CA 2023 added to DB (bit 0x1000 cleared) - KEK update still pending |
+| `0x4100` | KEK 2K CA 2023 applied (bit 0x0004 cleared) - Boot Manager update still pending |
+| `0x4000` | Fully complete - Boot Manager updated (bit 0x0100 cleared); `0x4000` modifier remains permanently set |
+
+Per [KB5085046](https://support.microsoft.com/en-us/kb/5085046), bit `0x4000` is a behavior modifier that is never cleared. A final value of `0x4000` indicates all applicable update actions have completed successfully.
 
 ### Verification
 
 Final status is read from:
 - `UEFICA2023Status` under `HKLM:\...\SecureBoot\Servicing` - expected value: `Updated`
 - `UEFICA2023Error` under `HKLM:\...\SecureBoot\Servicing` - must be absent. This key exists only when a deployment error has occurred and does **not** appear in the Windows Event Log. A VM can show `UEFICA2023Status = Updated` while this key is present; the script treats this as an incomplete result and records it in the `UEFICA2023Error` CSV column and `Notes`.
+- `UEFICA2023ErrorEvent` under `HKLM:\...\SecureBoot\Servicing` - companion to `UEFICA2023Error`, contains the event ID associated with the error condition when present. Recorded in VM `Notes` when set.
 - `Get-SecureBootUEFI kek` - must contain `Microsoft Corporation KEK 2K CA 2023`
 - `Get-SecureBootUEFI db` - must contain `Windows UEFI CA 2023`
 - `Get-SecureBootUEFI PK` - expected `Valid_WindowsOEM` after PK enrollment
 
-The script also reads the following event IDs from the System log (TPM-WMI source) per [KB 5016061](https://support.microsoft.com/en-us/topic/secure-boot-db-and-dbx-variable-update-events-37e47cf8-608b-4a87-8175-bdead630eb69) and records them in the CSV output:
+The script reads the following event IDs from the System log (TPM-WMI source) per [KB5016061](https://support.microsoft.com/en-us/topic/secure-boot-db-and-dbx-variable-update-events-37e47cf8-608b-4a87-8175-bdead630eb69) and [KB5085046](https://support.microsoft.com/en-us/kb/5085046) and records them in the CSV output:
 
 | Event ID | Level | Meaning |
 |----------|-------|---------|
-| 1808 | Information | All certificates and boot manager applied to firmware - definitive success signal |
+| 1036 | Information | Windows UEFI CA 2023 added to Secure Boot DB |
+| 1043 | Information | KEK 2K CA 2023 applied successfully |
+| 1044 | Information | Microsoft Option ROM UEFI CA 2023 added to DB |
+| 1045 | Information | Microsoft UEFI CA 2023 added to DB |
+| 1795 | Error | Firmware returned error on Secure Boot variable write - contact OEM |
+| 1797 | Error | Boot manager update failed - check firmware |
+| 1799 | Information | Boot manager signed by Windows UEFI CA 2023 applied successfully |
+| 1800 | Warning | Reboot required before Secure Boot update can proceed |
 | 1801 | Error | Certificates updated but not yet applied to firmware - additional reboot may be needed |
 | 1802 | Error | Update blocked by known firmware issue - contact OEM for firmware update |
 | 1803 | Error | No PK-signed KEK found - PK remediation required |
-| 1800 | Warning | Reboot required before Secure Boot update can proceed |
-| 1795 | Error | Firmware returned error on Secure Boot variable write - contact OEM |
+| 1808 | Information | All certificates and boot manager applied to firmware - definitive success signal |
 
-Event 1808 absence does **not** block a successful result in the CSV. Testing confirmed it may not fire until an extra reboot after the task completes, even on a fully successful deployment. The registry signals and cert checks are the primary pass/fail gate. Error events (1801, 1802, 1803, 1795, 1800) are recorded in `Notes` when present.
+Event 1808 absence does **not** block a successful result in the CSV. Testing confirmed it may not fire until an extra reboot after the task completes, even on a fully successful deployment. The registry signals and cert checks are the primary pass/fail gate. Error events are recorded in `Notes` when present.
 
 ---
 
@@ -901,6 +914,16 @@ net start "VMware Tools"
 If Tools is not installed, deploy it via vSphere Client (**VM -> Guest OS ->
 Install VMware Tools**) or through your software deployment tooling before
 running the script. After installation a reboot is required.
+
+### BitLocker recovery after Secure Boot update
+
+Per [KB5085046](https://support.microsoft.com/en-us/kb/5085046), there are two BitLocker recovery scenarios related to Secure Boot updates:
+
+**One-time recovery on first boot after update**  -  the VM enters BitLocker recovery once but boots normally on subsequent restarts. This happens because firmware does not immediately report updated Secure Boot values when Windows attempts to reseal BitLocker. Enter the recovery key to resume. Subsequent boots will not prompt recovery.
+
+**Repeated recovery due to PXE first boot**  -  if the VM is configured to attempt PXE boot before the local disk, BitLocker will enter recovery on every boot. This occurs because the PXE boot path is signed by the Microsoft UEFI CA 2011 while the on-disk Windows boot manager is now signed by the Windows UEFI CA 2023. BitLocker observes two different signing authorities during startup and cannot establish stable TPM measurements to reseal against.
+
+To resolve repeated PXE recovery: configure the firmware boot order so the local Windows boot manager boots first, or disable PXE if it is not required. If PXE is required, ensure the PXE infrastructure uses a 2023-signed Windows boot loader.
 
 ### Snapshot creation fails
 
