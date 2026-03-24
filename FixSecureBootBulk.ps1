@@ -111,6 +111,14 @@
     Seconds to wait after issuing a reboot before polling for Tools.
     Default 90. Increase for slower VMs.
 
+.PARAMETER GracefulShutdownTimeout
+    Seconds to wait for a graceful guest OS shutdown before falling back to a
+    hard power off. The script always attempts a graceful shutdown via VMware
+    Tools first (equivalent to clicking Shut Down in Windows). If the guest has
+    not powered off within this timeout, a hard power off is issued automatically.
+    Default 120. Set to 0 to skip the graceful shutdown attempt and always use
+    hard power off.
+
 .PARAMETER InterVMDelay
     Seconds to wait between processing each VM. Useful when remediating paired
     or co-dependent VMs (e.g. primary/secondary, database/app server) where the
@@ -255,6 +263,7 @@ param(
     [string]$KEKDerPath,
     [int]$WaitSeconds = 90,
     [int]$InterVMDelay = 0,
+    [int]$GracefulShutdownTimeout = 120,
     [switch]$IgnoreCertificateWarnings,
     [switch]$Assess,
     [switch]$UpgradeHardware
@@ -419,6 +428,44 @@ function Resolve-TargetVMs {
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+
+# Attempts a graceful guest OS shutdown via VMware Tools (equivalent to
+# clicking Shut Down in Windows). Waits up to $GracefulShutdownTimeout seconds
+# for the VM to power off. Falls back to hard power off if the timeout expires
+# or if Tools is not running. Set $GracefulShutdownTimeout to 0 to always use
+# hard power off.
+function Stop-VMGraceful {
+    param(
+        [Parameter(Mandatory)][VMware.VimAutomation.ViCore.Types.V1.Inventory.VirtualMachine]$VM,
+        [int]$TimeoutSeconds = 120
+    )
+
+    if ($TimeoutSeconds -gt 0 -and $VM.Guest.State -eq "Running") {
+        Write-Host "    Requesting graceful shutdown..." -ForegroundColor Cyan
+        try {
+            Shutdown-VMGuest -VM $VM -Confirm:$false -ErrorAction Stop | Out-Null
+            $elapsed = 0
+            while ($elapsed -lt $TimeoutSeconds) {
+                Start-Sleep -Seconds 5
+                $elapsed += 5
+                $VM = Get-VM -Name $VM.Name -ErrorAction SilentlyContinue
+                if ($VM.PowerState -eq "PoweredOff") {
+                    Write-Host "    Guest shutdown complete." -ForegroundColor Green
+                    return
+                }
+            }
+            Write-Warning "    Graceful shutdown timed out after ${TimeoutSeconds}s - falling back to hard power off."
+        } catch {
+            Write-Warning "    Graceful shutdown request failed ($($_.Exception.Message)) - falling back to hard power off."
+        }
+    }
+
+    # Hard power off fallback
+    $VM = Get-VM -Name $VM.Name -ErrorAction SilentlyContinue
+    if ($VM.PowerState -ne "PoweredOff") {
+        Stop-VM -VM $VM -Confirm:$false -Kill -ErrorAction Stop | Out-Null
+    }
+}
 
 function Wait-VMTools {
     param($VMObj, [int]$TimeoutSeconds = 300)
@@ -1684,8 +1731,7 @@ if ($isStandaloneUpgrade) {
 
             if ($wasPoweredOn) {
                 Write-Host "  Powering off..." -ForegroundColor Cyan
-                Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
-                Start-Sleep -Seconds 10
+                Stop-VMGraceful -VM $vm -TimeoutSeconds $GracefulShutdownTimeout
             }
 
             $upResult = Invoke-VMHardwareUpgrade -VMObj $vm
@@ -1997,8 +2043,8 @@ if ($Rollback) {
             # Step 1 - Power off
             Write-Host "  [1/4] Powering off..." -ForegroundColor Cyan
             if ($vm.PowerState -eq "PoweredOn") {
-                Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
-                Start-Sleep -Seconds 10
+                Stop-VMGraceful -VM $vm -TimeoutSeconds $GracefulShutdownTimeout
+                $vm = Get-VM -Name $currentVMName -ErrorAction SilentlyContinue
             }
             $row.PoweredOff = $true
 
@@ -2396,8 +2442,8 @@ foreach ($vm in $vms) {
         if ($entryStep -notin @("skipNvram","skipToStep6","certDone")) {
         Write-Host "  [2/9] Powering off..." -ForegroundColor Cyan
         if ($vm.PowerState -eq "PoweredOn") {
-            Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
-            Start-Sleep -Seconds 10
+            Stop-VMGraceful -VM $vm -TimeoutSeconds $GracefulShutdownTimeout
+            $vm = Get-VM -Name $currentVMName -ErrorAction SilentlyContinue
         }
 
         # ------------------------------------------------------------------
@@ -2819,8 +2865,8 @@ foreach ($vm in $vms) {
 
             # [2/5] Power off and on - SetupMode takes effect on next boot
             Write-Host "  [PK 2/5] Rebooting into SetupMode..." -ForegroundColor Cyan
-            Stop-VM -VM $vm -Confirm:$false -Kill -ErrorAction Stop | Out-Null
-            Start-Sleep -Seconds 5
+            Stop-VMGraceful -VM $vm -TimeoutSeconds $GracefulShutdownTimeout
+            $vm = Get-VM -Name $currentVMName -ErrorAction SilentlyContinue
             Start-VM -VM $vm | Out-Null
             $vm = Get-VM -Name $currentVMName
             if (-not (Wait-VMTools -VM $vm -TimeoutSeconds 300)) {
