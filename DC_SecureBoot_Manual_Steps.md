@@ -23,9 +23,10 @@ entirely before touching DC2 (the PDC Emulator holder).
 - ESXi host must be on **8.0.2 or later** - earlier versions will not regenerate NVRAM with 2023 certificates
 - VM hardware version must be **13 or later** - required for EFI/Secure Boot support
 - VM hardware version must be **21 or later** - required for ESXi to populate regenerated NVRAM with the 2023 KEK certificate; upgrade hardware version before proceeding if below 21
-- **VMware Tools must be installed and running** on the DC - required for `Invoke-VMScript` to verify NVRAM cert presence after power-on. Check status in vSphere Client or with PowerCLI:
+- **VMware Tools must be installed and running** on the DC - required for `Invoke-VMScript` to verify NVRAM cert presence after power-on. Tools should be current with your ESXi host version; outdated Tools can cause guest script execution to fail silently. Check status in vSphere Client or with PowerCLI:
   ```powershell
   (Get-VM "DC1").Guest.ExtensionData.ToolsStatus  # Expected: toolsOk
+  (Get-VM "DC1").Guest.ToolsVersion               # Compare against ESXi bundled version
   ```
 - **BitLocker:** If BitLocker is enabled on the DC, you must back up the recovery key and suspend protection **before** rebooting. Changing Secure Boot variables alters PCR 7 measurements and will trigger BitLocker recovery mode if protection is not suspended. See the BitLocker section in each phase below.
 - **PK remediation:** Download `WindowsOEMDevicesPK.der` from Microsoft's repository before starting if you intend to enroll the Platform Key:
