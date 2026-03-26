@@ -71,7 +71,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 ### VMware Tools
 - **VMware Tools must be installed, running, and recognized by vCenter** on all target VMs
   - The script uses `Invoke-VMScript` for all guest operations; vCenter will reject these calls if Tools is not running
-  - Tools version **10.0 or later** recommended - older versions may not support all script execution features
+  - Tools should be current with the ESXi host version. There is no fixed minimum version number; the "out of date" warning from vCenter is a relative comparison between the version installed in the guest and the version bundled with the ESXi host the VM is running on. Outdated Tools will appear in yellow in the console output and can cause `Invoke-VMScript` to fail silently with ExitCode 1 and no output. The script displays the installed Tools version and status for every VM at the start of each run so you can identify which VMs need an update before proceeding.
   - "Open VM Tools" (OVT) is supported on Windows Server 2019 and later as it ships inbox, but the standard VMware Tools package is preferred for full compatibility
 - Check Tools status across all VMs:
   ```powershell
