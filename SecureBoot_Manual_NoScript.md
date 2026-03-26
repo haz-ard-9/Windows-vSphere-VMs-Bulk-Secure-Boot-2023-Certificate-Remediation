@@ -94,6 +94,11 @@ on the guest. No `.ps1` script files are required.
 - ESXi host must be **8.0.2 or later** - earlier versions will not regenerate
   NVRAM with 2023 certificates
 - VM hardware version must be **13 or later**
+- **VMware Tools must be installed and running** on the VM - required for vSphere Client to show power state and for guest operations to complete correctly. Tools should be current with your ESXi host version; outdated Tools can cause guest script execution to fail. Check status in vSphere Client under the VM Summary tab, or with PowerCLI:
+  ```powershell
+  (Get-VM "vmname").Guest.ExtensionData.ToolsStatus  # Expected: toolsOk
+  (Get-VM "vmname").Guest.ToolsVersion               # Compare against ESXi bundled version
+  ```
 - vSphere Client access with permissions to manage VMs and browse datastores
 - RDP or console access to the guest VM
 - `WindowsOEMDevicesPK.der` downloaded from Microsoft (required for PK
