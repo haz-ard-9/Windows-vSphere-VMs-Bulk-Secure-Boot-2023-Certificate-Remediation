@@ -269,6 +269,8 @@ param(
     [switch]$UpgradeHardware
 )
 
+$ScriptVersion = "v1.5 / 2026-03-26"
+
 # =============================================================================
 # PARAMETER VALIDATION
 # =============================================================================
@@ -339,6 +341,8 @@ if (-not $global:DefaultVIServer) {
 
 $isMainMode         = -not $CleanupSnapshots -and -not $CleanupHWSnapshots -and -not $CleanupNvram -and -not $Rollback -and -not $Assess -and -not ($UpgradeHardware -and -not $GuestCredential)
 $isStandaloneUpgrade = $UpgradeHardware -and -not $GuestCredential
+
+Write-Host "FixSecureBootBulk.ps1 $ScriptVersion" -ForegroundColor Cyan
 if ($isMainMode -and -not $GuestCredential) {
     $GuestCredential = Get-Credential -Message "Guest OS credentials (domain admin)"
 }
@@ -1266,7 +1270,7 @@ $e1036 = "False"; $e1043 = "False"; $e1044 = "False"; $e1045 = "False"
 $e1795 = "False"; $e1797 = "False"; $e1799 = "False"; $e1800 = "False"
 $e1801 = "False"; $e1802 = "False"; $e1803 = "False"; $e1808 = "False"
 try {
-    $startTime = [datetime]"VERIFY_START_TIME"
+    $startTime = [datetime]::ParseExact("VERIFY_START_TIME", "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
     $evts = Get-WinEvent -LogName "System" -EA Stop |
         Where-Object { $_.ProviderName -eq "Microsoft-Windows-TPM-WMI" -and $_.Id -in @(1036,1043,1044,1045,1795,1797,1799,1800,1801,1802,1803,1808) -and $_.TimeCreated -ge $startTime } |
         Select-Object -First 100
@@ -1539,6 +1543,10 @@ if ($Assess) {
         Write-Host "  ESXi Host  : $($row.ESXiHost) v$($row.ESXiVersion)"
         Write-Host "  Firmware   : $firmware | Secure Boot: $($row.SecureBoot)"
         Write-Host "  Power      : $($vm.PowerState)"
+        $toolsVer    = $vm.Guest.ToolsVersion
+        $toolsStatus = $vm.Guest.ToolsVersionStatus
+        $toolsColor  = if ($toolsStatus -eq "guestToolsCurrent") { "Green" } elseif ($toolsStatus -eq "guestToolsNeedUpgrade") { "Yellow" } else { "Gray" }
+        Write-Host "  VMware Tools: $toolsVer ($toolsStatus)" -ForegroundColor $toolsColor
         Write-Host "  nvram_old  : $hasNvramOld | Snapshot: $hasSnapshot"
         $dsColor = if ($dsInfo.Sufficient) { "Gray" } else { "Yellow" }
         Write-Host "  Datastore  : $($dsInfo.Datastore) | Free: $($dsInfo.FreeGB) GB / $($dsInfo.CapacityGB) GB | Snapshot est: $($dsInfo.EstimateDisplay) ($($dsInfo.EstimateBasis))" -ForegroundColor $dsColor
@@ -1567,7 +1575,7 @@ if ($Assess) {
                 $row.KEK_2023         = $aData.KEK_2023
                 $row.DB_2023          = $aData.DB_2023
                 $row.PK_Status        = $aData.PK_Status
-                $row.UEFICA2023Status = if ($aData.UEFICA2023Status) { $aData.UEFICA2023Status } else { "not found" }
+                $row.UEFICA2023Status = if ($aData.UEFICA2023Status -and $aData.UEFICA2023Status -notlike "") { $aData.UEFICA2023Status } else { "not found" }
                 $row.AvailableUpdates = $aData.AvailableUpdates
                 $row.UEFICA2023Error  = if ($aData.UEFICA2023ErrorExists -eq "True") { "ERROR ($($aData.UEFICA2023ErrorValue))" } else { "" }
                 if ($aData.UEFICA2023ErrorEvent) { $row.Notes += "UEFICA2023ErrorEvent: $($aData.UEFICA2023ErrorEvent). " }
@@ -1631,7 +1639,7 @@ if ($Assess) {
         UEFICA2023Error, Evt1808, BitLockerActive, ActionNeeded -AutoSize
 
     $csvPath = ".\SecureBoot_Assess_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $assessReport | Export-Csv -Path $csvPath -NoTypeInformation
+    $assessReport | Select-Object @{N="ScriptVersion";E={$ScriptVersion}},* | Export-Csv -Path $csvPath -NoTypeInformation
     Write-Host "Exported to: $csvPath" -ForegroundColor Green
 
     $needHW      = ($assessReport | Where-Object { $_.HWVersionOK -eq $false -and $_.Firmware -eq "efi" }).Count
@@ -1763,7 +1771,7 @@ if ($isStandaloneUpgrade) {
     Write-Host "`n=== HARDWARE UPGRADE SUMMARY ===" -ForegroundColor White
     $hwReport | Format-Table VMName, FromVersion, ToVersion, SnapshotCreated, Upgraded, Result, Notes -AutoSize
     $csvPath = ".\SecureBoot_HWUpgrade_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $hwReport | Export-Csv -Path $csvPath -NoTypeInformation
+    $hwReport | Select-Object @{N="ScriptVersion";E={$ScriptVersion}},* | Export-Csv -Path $csvPath -NoTypeInformation
     Write-Host "Exported to: $csvPath" -ForegroundColor Green
     $upgraded  = ($hwReport | Where-Object { $_.Upgraded }).Count
     $skipped   = ($hwReport | Where-Object { $_.Result -like "Skipped*" }).Count
@@ -1989,7 +1997,7 @@ if ($CleanupSnapshots -or $CleanupHWSnapshots -or $CleanupNvram) {
     if ($failed  -gt 0) { Write-Host "Failed    : $failed (remove manually via vSphere client)" -ForegroundColor Red }
 
     $csvPath = ".\SecureBoot_Cleanup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $cleanupReport | Export-Csv -Path $csvPath -NoTypeInformation
+    $cleanupReport | Select-Object @{N="ScriptVersion";E={$ScriptVersion}},* | Export-Csv -Path $csvPath -NoTypeInformation
     Write-Host "Exported to: $csvPath" -ForegroundColor Green
     return
 }
@@ -2115,7 +2123,7 @@ if ($Rollback) {
         SnapshotReverted, PoweredOn, Result, Notes -AutoSize
 
     $csvPath = ".\SecureBoot_Rollback_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $rollbackReport | Export-Csv -Path $csvPath -NoTypeInformation
+    $rollbackReport | Select-Object @{N="ScriptVersion";E={$ScriptVersion}},* | Export-Csv -Path $csvPath -NoTypeInformation
     Write-Host "Exported to: $csvPath" -ForegroundColor Green
 
     $full    = ($rollbackReport | Where-Object { $_.Result -like "Rolled Back*" }).Count
@@ -2249,6 +2257,10 @@ foreach ($vm in $vms) {
     Write-Host "`n$('='*60)" -ForegroundColor White
     Write-Host "Processing: $currentVMName" -ForegroundColor White
     Write-Host "$('='*60)" -ForegroundColor White
+    $toolsVer    = $vm.Guest.ToolsVersion
+    $toolsStatus = $vm.Guest.ToolsVersionStatus
+    $toolsColor  = if ($toolsStatus -eq "guestToolsCurrent") { "Green" } elseif ($toolsStatus -eq "guestToolsNeedUpgrade") { "Yellow" } else { "Gray" }
+    Write-Host "  VMware Tools: $toolsVer ($toolsStatus)" -ForegroundColor $toolsColor
 
     $row = [PSCustomObject]@{
         VMName              = $currentVMName
@@ -3019,7 +3031,7 @@ $report | Format-Table VMName, SnapshotCreated, BitLockerKeysBacked, BitLockerSu
     PK_Status, PKEnrolled, PKRemediated, SnapshotRetained, Notes -AutoSize
 
 $csvPath = ".\SecureBoot_Bulk_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-$report | Export-Csv -Path $csvPath -NoTypeInformation
+$report | Select-Object @{N="ScriptVersion";E={$ScriptVersion}},* | Export-Csv -Path $csvPath -NoTypeInformation
 Write-Host "Exported to: $csvPath" -ForegroundColor Green
 
 $total      = $report.Count
