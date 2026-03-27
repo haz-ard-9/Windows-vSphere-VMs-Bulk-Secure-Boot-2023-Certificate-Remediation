@@ -154,17 +154,13 @@ validation for that session only (see [Parameters](#parameters)).
 
 ## Configuration
 
-Before running the script, open `FixSecureBootBulk.ps1` in a text editor and
-update the vCenter server address on this line:
+Pass `-vCenter` on the command line to specify your vCenter server. If not provided and no connection is already active, the script will prompt for the server name:
 
 ```powershell
-Connect-VIServer -Server "vcenter.yourdomain.com" ...
+.\FixSecureBootBulk.ps1 -vCenter "vcenter.yourdomain.com" -VMName "vm01" -GuestCredential $cred
 ```
 
-Replace `vcenter.yourdomain.com` with the hostname or IP address of your vCenter instance.
-
-Alternatively, you can pre-connect to vCenter before running the script and it
-will use the existing session:
+Alternatively, pre-connect to vCenter before running the script and it will use the existing session:
 
 ```powershell
 Connect-VIServer -Server "vcenter.yourdomain.com"
@@ -308,6 +304,7 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-GracefulShutdownTimeout` | `int` | Seconds to wait for a graceful guest OS shutdown before falling back to a hard power off. The script always attempts a graceful shutdown via VMware Tools first. Default: `120`. Set to `0` to always use hard power off. |
 | `-InterVMDelay` | `int` | Seconds to wait between processing each VM. Default: `0`. Use when remediating paired or co-dependent VMs (primary/secondary, database/app server) to allow services to fully start before the next VM is processed. Not applied after the last VM in the batch. |
 | `-IgnoreCertificateWarnings` | `switch` | Sets PowerCLI `InvalidCertificateAction` to `Ignore` for the current session before connecting to vCenter. Only use this if your vCenter uses a self-signed or untrusted certificate. Omitting this flag leaves your existing PowerCLI certificate configuration unchanged. |
+| `-vCenter` | `string` | Hostname or IP address of the vCenter server. If not specified and no existing connection is active, the script will prompt for the server name. If a connection is already open the script uses it and this parameter is ignored. |
 | `-Assess` | `switch` | Read-only assessment mode. No changes are made to any VM. Collects current state for all target VMs and produces a CSV and console summary. See [Assessment Mode](#assessment-mode). Mutually exclusive with all action modes. |
 | `-UpgradeHardware` | `switch` | Upgrades VM hardware version to the latest supported by the host. Can be used standalone (powers off, upgrades, powers on - no cert work) or combined with the main remediation run, where it is inserted between step 2 and step 3. See [Hardware Version Upgrade](#hardware-version-upgrade). |
 | `-CleanupHWSnapshots` | `switch` | Removes all `Pre-HWUpgrade*` snapshots created by standalone `-UpgradeHardware` runs. Run after verifying the hardware upgrade is stable. Does not require `-GuestCredential`. |
