@@ -134,6 +134,12 @@
     configuration unchanged. If your vCenter has a properly signed certificate
     this flag is not needed and should not be used.
 
+.PARAMETER vCenter
+    Hostname or IP address of the vCenter server to connect to. If not specified
+    and no existing vCenter connection is active, the script will prompt for a
+    server name. If an existing connection is already open the script uses it
+    and this parameter is ignored.
+
 .PARAMETER Assess
     Read-only assessment mode. No changes are made to any VM. Collects current
     state for all target VMs and outputs a CSV and console summary identifying
@@ -265,11 +271,12 @@ param(
     [int]$InterVMDelay = 0,
     [int]$GracefulShutdownTimeout = 120,
     [switch]$IgnoreCertificateWarnings,
+    [string]$vCenter,
     [switch]$Assess,
     [switch]$UpgradeHardware
 )
 
-$ScriptVersion = "v1.5 / 2026-03-26"
+$ScriptVersion = "v1.6 / 2026-03-27"
 
 # =============================================================================
 # PARAMETER VALIDATION
@@ -328,7 +335,8 @@ if ($PKDerPath) {
 
 # =============================================================================
 # VCENTER CONNECTION
-# Update the server name below to match your vCenter instance.
+# Pass -vCenter to specify the server name on the command line.
+# If -vCenter is not provided and no connection is active, the script will prompt.
 # =============================================================================
 if (-not $global:DefaultVIServer) {
     if ($IgnoreCertificateWarnings) {
@@ -336,7 +344,8 @@ if (-not $global:DefaultVIServer) {
         Write-Warning "Only use this flag if your vCenter certificate is self-signed or untrusted and you have accepted that risk."
         Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope Session -Confirm:$false
     }
-    Connect-VIServer -Server "vcenter.yourdomain.com" -Credential (Get-Credential -Message "vCenter credentials")
+    $vcServer = if ($vCenter) { $vCenter } else { Read-Host "vCenter server hostname or IP" }
+    Connect-VIServer -Server $vcServer -Credential (Get-Credential -Message "vCenter credentials")
 }
 
 $isMainMode         = -not $CleanupSnapshots -and -not $CleanupHWSnapshots -and -not $CleanupNvram -and -not $Rollback -and -not $Assess -and -not ($UpgradeHardware -and -not $GuestCredential)
@@ -558,60 +567,80 @@ function Wait-DatastoreTask {
 # Upgrades VM hardware version to the latest supported by the host.
 # Returns a hashtable: { Upgraded = $true/$false; FromVersion = N; ToVersion = N; Notes = "" }
 function Invoke-VMHardwareUpgrade {
-    param($VMObj)
-    $result = @{ Upgraded = $false; FromVersion = ""; ToVersion = ""; Notes = "" }
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$VMObj,
+        [int]$TargetVersion,
+        [int]$TimeoutSeconds = 120
+    )
+    $result = [ordered]@{ Upgraded = $false; FromVersion = $null; ToVersion = $null; Notes = "" }
     try {
-        $vmView     = $VMObj | Get-View
-        $currentVer = $vmView.Config.Version  # e.g. "vmx-19"
-        $currentNum = [int]($currentVer -replace 'vmx-', '')
+        $vmView     = Get-VM $VMObj | Get-View -ErrorAction Stop
+        $currentVer = $vmView.Config.Version
+        $currentNum = [int]($currentVer -replace '^vmx-', '')
         $result.FromVersion = $currentNum
 
-        # Get the maximum hardware version supported by the host
-        $vmHost      = Get-VMHost -VM $VMObj -ErrorAction Stop
-        $hostView    = $vmHost | Get-View
-        $maxVerStr   = ($hostView.Capability.SupportedEVCMode |
-            Where-Object { $_ -match 'vmx-' } |
-            ForEach-Object { [int]($_ -replace '.*vmx-(\d+).*','$1') } |
-            Measure-Object -Maximum).Maximum
-        if (-not $maxVerStr) {
-            # Fallback: use Get-VMHostHardware or derive from ESXi version
-            $esxiVer = [version]$vmHost.Version
-            $maxVerStr = switch ($esxiVer.Major) {
-                9 { 22 }
-                8 { 21 }
-                7 { 19 }
-                default { 21 }
-            }
-        }
-        $result.ToVersion = $maxVerStr
-
-        if ($currentNum -ge $maxVerStr) {
-            $result.Notes = "Already at version $currentNum - no upgrade needed."
-            return $result
+        if (-not $PSBoundParameters.ContainsKey('TargetVersion')) {
+            throw "TargetVersion is required. Call Get-MaxHWVersionForHost first to determine the correct target."
         }
 
-        Write-Host "    Upgrading hardware version: $currentNum -> $maxVerStr" -ForegroundColor Gray
-        $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
-        $spec.Version = "vmx-$maxVerStr"
-        $task = $vmView.ReconfigVM_Task($spec)
-        $taskView = Get-View $task
-        $elapsed  = 0
-        while ($taskView.Info.State -notin @('success','error') -and $elapsed -lt 60) {
-            Start-Sleep -Seconds 3; $elapsed += 3
-            $taskView = Get-View $task
+        $result.ToVersion = $TargetVersion
+
+        if ($currentNum -ge $TargetVersion) {
+            $result.Notes = "Already at version $currentNum or higher."
+            return [pscustomobject]$result
         }
-        if ($taskView.Info.State -eq 'success') {
-            Write-Host "    Hardware version upgraded to $maxVerStr." -ForegroundColor Green
-            $result.Upgraded = $true
+
+        Write-Host "    Upgrading hardware version: vmx-$currentNum -> vmx-$TargetVersion" -ForegroundColor Gray
+        $taskMoRef = $vmView.UpgradeVM_Task("vmx-$TargetVersion")
+        $taskView  = Get-View -Id $taskMoRef -ErrorAction Stop
+        $elapsed   = 0
+        while ($taskView.Info.State -in @("running","queued")) {
+            if ($elapsed -ge $TimeoutSeconds) { throw "Timed out waiting for hardware upgrade task." }
+            Start-Sleep -Seconds 3
+            $elapsed += 3
+            $taskView = Get-View -Id $taskMoRef
+        }
+        if ($taskView.Info.State -eq "success") {
+            $vmView = Get-VM $VMObj | Get-View -ErrorAction Stop
+            $newNum = [int]($vmView.Config.Version -replace '^vmx-', '')
+            $result.ToVersion = $newNum
+            $result.Upgraded  = $true
+            $result.Notes     = "Hardware upgraded successfully."
+            Write-Host "    Hardware version upgraded to vmx-$newNum." -ForegroundColor Green
         } else {
-            $result.Notes = "Upgrade failed: $($taskView.Info.Error.LocalizedMessage)"
+            $err = $taskView.Info.Error.LocalizedMessage
+            if (-not $err) { $err = "Unknown task error." }
+            $result.Notes = "Upgrade failed: $err"
             Write-Warning "    $($result.Notes)"
         }
     } catch {
         $result.Notes = "Upgrade error: $($_.Exception.Message)"
         Write-Warning "    $($result.Notes)"
     }
-    return $result
+    [pscustomobject]$result
+}
+
+# Returns the maximum hardware version supported by the ESXi host a VM is
+# running on. Uses the ESXi version string as the source of truth since the
+# PowerCLI capability object properties for HW version are not consistently
+# populated across all vCenter/PowerCLI versions.
+function Get-MaxHWVersionForHost {
+    param($VMObj)
+    try {
+        $vmHost  = Get-VMHost -VM $VMObj -ErrorAction Stop
+        $esxiVer = [version]$vmHost.Version
+        $max = switch ($esxiVer.Major) {
+            9       { 22 }
+            8       { 21 }
+            7       { 19 }
+            default { 21 }
+        }
+        return $max
+    } catch {
+        Write-Warning "Could not determine ESXi host version for $($VMObj.Name) - defaulting to HW version 21."
+        return 21
+    }
 }
 
 # Returns datastore name, free space, estimated snapshot size, and whether
@@ -1544,7 +1573,7 @@ if ($Assess) {
         Write-Host "  Firmware   : $firmware | Secure Boot: $($row.SecureBoot)"
         Write-Host "  Power      : $($vm.PowerState)"
         $toolsVer    = $vm.Guest.ToolsVersion
-        $toolsStatus = $vm.Guest.ToolsVersionStatus
+        $toolsStatus = $vm.Guest.ExtensionData.ToolsVersionStatus
         $toolsColor  = if ($toolsStatus -eq "guestToolsCurrent") { "Green" } elseif ($toolsStatus -eq "guestToolsNeedUpgrade") { "Yellow" } else { "Gray" }
         Write-Host "  VMware Tools: $toolsVer ($toolsStatus)" -ForegroundColor $toolsColor
         Write-Host "  nvram_old  : $hasNvramOld | Snapshot: $hasSnapshot"
@@ -1742,8 +1771,7 @@ if ($isStandaloneUpgrade) {
                 Stop-VMGraceful -VM $vm -TimeoutSeconds $GracefulShutdownTimeout
             }
 
-            $upResult = Invoke-VMHardwareUpgrade -VMObj $vm
-            $hwRow.ToVersion = $upResult.ToVersion
+            $upResult = Invoke-VMHardwareUpgrade -VMObj $vm -TargetVersion (Get-MaxHWVersionForHost -VMObj $vm)
             $hwRow.Upgraded  = $upResult.Upgraded
             if ($upResult.Notes) { $hwRow.Notes += $upResult.Notes }
 
@@ -2258,7 +2286,7 @@ foreach ($vm in $vms) {
     Write-Host "Processing: $currentVMName" -ForegroundColor White
     Write-Host "$('='*60)" -ForegroundColor White
     $toolsVer    = $vm.Guest.ToolsVersion
-    $toolsStatus = $vm.Guest.ToolsVersionStatus
+    $toolsStatus = $vm.Guest.ExtensionData.ToolsVersionStatus
     $toolsColor  = if ($toolsStatus -eq "guestToolsCurrent") { "Green" } elseif ($toolsStatus -eq "guestToolsNeedUpgrade") { "Yellow" } else { "Gray" }
     Write-Host "  VMware Tools: $toolsVer ($toolsStatus)" -ForegroundColor $toolsColor
 
@@ -2467,7 +2495,7 @@ foreach ($vm in $vms) {
             $hwVerNum = [int](($vmView.Config.Version) -replace 'vmx-', '')
             if ($hwVerNum -lt 21) {
                 Write-Host "  [2b/9] Upgrading hardware version (current: $hwVerNum)..." -ForegroundColor Cyan
-                $upResult = Invoke-VMHardwareUpgrade -VMObj $vm
+                $upResult = Invoke-VMHardwareUpgrade -VMObj $vm -TargetVersion (Get-MaxHWVersionForHost -VMObj $vm)
                 if ($upResult.Upgraded) {
                     $row.HWUpgraded = "$hwVerNum -> $($upResult.ToVersion)"
                     $vm = Get-VM -Name $currentVMName
