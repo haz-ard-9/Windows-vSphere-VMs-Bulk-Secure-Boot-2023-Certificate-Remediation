@@ -207,11 +207,11 @@
     .\FixSecureBootBulk.ps1 -CleanupHWSnapshots
 
     # Full remediation including PK enrollment (recommended - download WindowsOEMDevicesPK.der first)
-    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
+    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der"
 
     # Full remediation with PK enrollment and BitLocker key backup
-    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
+    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
         -BitLockerBackupShare "\\fileserver\BitLockerKeys"
 
@@ -276,7 +276,7 @@ param(
     [switch]$UpgradeHardware
 )
 
-$ScriptVersion = "v1.6 / 2026-03-27"
+$ScriptVersion = "v1.7 / 2026-03-30"
 
 # =============================================================================
 # PARAMETER VALIDATION
@@ -1266,6 +1266,9 @@ Write-Host "AvailableUpdates after second task run: 0x$("{0:X4}" -f $val)"
 
 # Final verification - registry status, firmware cert presence, and event log
 $verifyScript = @'
+$ErrorActionPreference = 'SilentlyContinue'
+$WarningPreference     = 'SilentlyContinue'
+$ProgressPreference    = 'SilentlyContinue'
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
 $svcPath = "$regPath\Servicing"
 
@@ -1348,6 +1351,35 @@ Write-Output "VERIFY_END"
 function Get-TimestampedVerifyScript {
     param([datetime]$StartTime)
     return $verifyScript -replace 'VERIFY_START_TIME', $StartTime.ToString('yyyy-MM-dd HH:mm:ss')
+}
+
+# Invoke-VMScript has an undocumented ScriptText size limit (observed ~2869 chars,
+# varies by guest OS and script type). Scripts that exceed this limit return
+# ExitCode 1 with completely empty output and no error message.
+# This function works around the limit by writing the script to a temp file on the
+# guest via Copy-VMGuestFile, executing it, then deleting the temp file.
+function Invoke-VMScriptViaFile {
+    param(
+        [Parameter(Mandatory)]$VM,
+        [Parameter(Mandatory)][string]$ScriptContent,
+        [Parameter(Mandatory)][PSCredential]$GuestCredential,
+        [string]$TempPath = "C:\Windows\Temp\__sb_verify_$([System.IO.Path]::GetRandomFileName()).ps1"
+    )
+    # Write script to a local temp file to copy to guest
+    $localTemp = [System.IO.Path]::GetTempFileName() + ".ps1"
+    try {
+        [System.IO.File]::WriteAllText($localTemp, $ScriptContent, [System.Text.Encoding]::UTF8)
+        Copy-VMGuestFile -Source $localTemp -Destination $TempPath `
+            -VM $VM -LocalToGuest -GuestCredential $GuestCredential `
+            -Force -ErrorAction Stop | Out-Null
+    } finally {
+        Remove-Item $localTemp -ErrorAction SilentlyContinue
+    }
+
+    # Execute the file on the guest then clean up
+    $execScript = "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '$TempPath'; Remove-Item '$TempPath' -Force -ErrorAction SilentlyContinue"
+    return Invoke-VMScript -VM $VM -ScriptText $execScript `
+        -ScriptType Powershell -GuestCredential $GuestCredential -ErrorAction Stop
 }
 
 # Check Platform Key validity in guest (used before PK remediation).
@@ -1596,8 +1628,8 @@ if ($Assess) {
         # Guest-level collection
         if ($GuestCredential -and $vm.PowerState -eq "PoweredOn") {
             try {
-                $aOut  = Invoke-VMScript -VM $vm -ScriptText $assessGuestScript `
-                    -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+                $aOut  = Invoke-VMScriptViaFile -VM $vm -ScriptContent $assessGuestScript `
+                    -GuestCredential $GuestCredential
                 $aData = $aOut.ScriptOutput.Trim() | ConvertFrom-Json
                 if ($null -eq $aData) { throw "Guest script returned no output - check VMware Tools version and guest PowerShell execution policy" }
 
@@ -2422,8 +2454,8 @@ foreach ($vm in $vms) {
         if ($vm.PowerState -eq "PoweredOn") {
             Write-Host "  [Pre] Assessing current state to determine required steps..." -ForegroundColor Cyan
             try {
-                $preOut  = Invoke-VMScript -VM $vm -ScriptText $assessGuestScript `
-                    -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+                $preOut  = Invoke-VMScriptViaFile -VM $vm -ScriptContent $assessGuestScript `
+                    -GuestCredential $GuestCredential
                 $preJson = ($preOut.ScriptOutput -split "`r?`n" |
                     Where-Object { $_.Trim() -match '^{' } | Select-Object -Last 1).Trim()
                 if ($preJson) {
@@ -2591,8 +2623,8 @@ foreach ($vm in $vms) {
         # ------------------------------------------------------------------
         Write-Host "  [7/9] Verifying final KEK/DB cert status..." -ForegroundColor Cyan
 
-        $verifyOut  = Invoke-VMScript -VM $vm -ScriptText (Get-TimestampedVerifyScript -StartTime $vmRunStart) `
-            -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+        $verifyOut  = Invoke-VMScriptViaFile -VM $vm -ScriptContent (Get-TimestampedVerifyScript -StartTime $vmRunStart) `
+            -GuestCredential $GuestCredential
 
         $verifyData = $null
         try {
@@ -2685,8 +2717,8 @@ foreach ($vm in $vms) {
             Write-Host $taskOut2.ScriptOutput -ForegroundColor Gray
 
             Write-Host "  [7b/9] Re-verifying after extra reboot..." -ForegroundColor Cyan
-            $verifyOut2  = Invoke-VMScript -VM $vm -ScriptText (Get-TimestampedVerifyScript -StartTime $vmRunStart) `
-                -ScriptType Powershell -GuestCredential $GuestCredential -EA Stop
+            $verifyOut2  = Invoke-VMScriptViaFile -VM $vm -ScriptContent (Get-TimestampedVerifyScript -StartTime $vmRunStart) `
+                -GuestCredential $GuestCredential
             $verifyData2 = $null
             try {
                 $lines2 = $verifyOut2.ScriptOutput -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
