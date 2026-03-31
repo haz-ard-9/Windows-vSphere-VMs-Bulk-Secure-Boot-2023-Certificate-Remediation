@@ -276,7 +276,7 @@ param(
     [switch]$UpgradeHardware
 )
 
-$ScriptVersion = "v1.7 / 2026-03-30"
+$ScriptVersion = "v1.7.1 / 2026-03-30"
 
 # =============================================================================
 # PARAMETER VALIDATION
@@ -495,6 +495,40 @@ function Wait-VMTools {
         Write-Host "    ...${elapsed}s" -ForegroundColor DarkGray
     }
     Write-Warning "Timed out waiting for VMware Tools on $($VMObj.Name)"
+    return $false
+}
+
+# After a SetupMode reboot, VMware Tools sets Guest.State = "Running" early but
+# GuestFamily and HostName are populated asynchronously 15-20 seconds later.
+# Copy-VMGuestFile requires a fully populated GuestInfo context and fails with
+# "guest OS unknown" / "A specified parameter was not correct" if GuestFamily or
+# HostName are still empty. This function polls until all three fields are set.
+# Called in [PK 2/5] after Wait-VMTools before Copy-VMGuestFile in [PK 3/5].
+# Root cause diagnosis and fix contributed by @thezeus123 (GitHub issue #8).
+function Wait-GuestIdKnown {
+    param($VMObj, [int]$TimeoutSeconds = 180)
+    $elapsed = 0
+    Write-Host "    Waiting for full guest context (GuestId + GuestFamily + HostName)..." -ForegroundColor Gray
+    while ($elapsed -lt $TimeoutSeconds) {
+        $current    = Get-VM -Name $VMObj.Name -ErrorAction SilentlyContinue
+        $guestId    = $current.GuestId
+        $guestFam   = $current.Guest.GuestFamily
+        $hostName   = $current.Guest.HostName
+        $guestIdOk  = $guestId  -and $guestId  -notmatch "other|unknown"
+        $guestFamOk = $guestFam -and $guestFam -notmatch "other|unknown"
+        $hostNameOk = $hostName -and $hostName -ne ""
+        if ($guestIdOk -and $guestFamOk -and $hostNameOk) {
+            Write-Host "    Guest context confirmed: GuestId=$guestId | Family=$guestFam | Host=$hostName" -ForegroundColor Green
+            return $true
+        }
+        Start-Sleep -Seconds 5
+        $elapsed += 5
+        Write-Host ("    ...${elapsed}s (GuestId={0} | Family={1} | HostName={2})" -f
+            $(if ($guestId)  { $guestId  } else { "?" }),
+            $(if ($guestFam) { $guestFam } else { "?" }),
+            $(if ($hostName) { $hostName } else { "?" })) -ForegroundColor DarkGray
+    }
+    Write-Warning "    Timed out waiting for full guest context on $($VMObj.Name) - proceeding anyway."
     return $false
 }
 
@@ -1298,29 +1332,19 @@ try {
     if ($dbBytes) { $db = ([System.Text.Encoding]::ASCII.GetString($dbBytes) -match "Windows UEFI CA 2023").ToString() }
 } catch {}
 
-$e1036 = "False"; $e1043 = "False"; $e1044 = "False"; $e1045 = "False"
-$e1795 = "False"; $e1797 = "False"; $e1799 = "False"; $e1800 = "False"
-$e1801 = "False"; $e1802 = "False"; $e1803 = "False"; $e1808 = "False"
+# Event collection via FilterHashTable + Group-Object contributed by @ckitt-git-hub-1020
+$EvtGroup = @()
 try {
     $startTime = [datetime]::ParseExact("VERIFY_START_TIME", "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
-    $evts = Get-WinEvent -LogName "System" -EA Stop |
-        Where-Object { $_.ProviderName -eq "Microsoft-Windows-TPM-WMI" -and $_.Id -in @(1036,1043,1044,1045,1795,1797,1799,1800,1801,1802,1803,1808) -and $_.TimeCreated -ge $startTime } |
-        Select-Object -First 100
-    foreach ($e in $evts) {
-        if ($e.Id -eq 1036) { $e1036 = "True" }
-        if ($e.Id -eq 1043) { $e1043 = "True" }
-        if ($e.Id -eq 1044) { $e1044 = "True" }
-        if ($e.Id -eq 1045) { $e1045 = "True" }
-        if ($e.Id -eq 1795) { $e1795 = "True" }
-        if ($e.Id -eq 1797) { $e1797 = "True" }
-        if ($e.Id -eq 1799) { $e1799 = "True" }
-        if ($e.Id -eq 1800) { $e1800 = "True" }
-        if ($e.Id -eq 1801) { $e1801 = "True" }
-        if ($e.Id -eq 1802) { $e1802 = "True" }
-        if ($e.Id -eq 1803) { $e1803 = "True" }
-        if ($e.Id -eq 1808) { $e1808 = "True" }
-    }
+    $EvtGroup = Get-WinEvent -FilterHashTable @{ProviderName="Microsoft-Windows-TPM-WMI";Id=1036,1043,1044,1045,1795,1797,1799,1800,1801,1802,1803,1808} -MaxEvents 100 -EA Stop |
+        Where-Object { $_.TimeCreated -ge $startTime } | Group-Object -Property Id
 } catch {}
+$e1036 = ($EvtGroup.Name -Contains 1036).ToString(); $e1043 = ($EvtGroup.Name -Contains 1043).ToString()
+$e1044 = ($EvtGroup.Name -Contains 1044).ToString(); $e1045 = ($EvtGroup.Name -Contains 1045).ToString()
+$e1795 = ($EvtGroup.Name -Contains 1795).ToString(); $e1797 = ($EvtGroup.Name -Contains 1797).ToString()
+$e1799 = ($EvtGroup.Name -Contains 1799).ToString(); $e1800 = ($EvtGroup.Name -Contains 1800).ToString()
+$e1801 = ($EvtGroup.Name -Contains 1801).ToString(); $e1802 = ($EvtGroup.Name -Contains 1802).ToString()
+$e1803 = ($EvtGroup.Name -Contains 1803).ToString(); $e1808 = ($EvtGroup.Name -Contains 1808).ToString()
 
 Write-Output "VERIFY_START"
 Write-Output "Servicing_Status=$svcStatus"
@@ -2945,8 +2969,9 @@ foreach ($vm in $vms) {
                 throw "Tools timeout after SetupMode reboot."
             }
             Write-Host "    VM is back online." -ForegroundColor Green
-
-            # [3/5] Copy .der certificate file(s) to guest temp
+            $vm = Get-VM -Name $currentVMName
+            Wait-GuestIdKnown -VMObj $vm -TimeoutSeconds 180 | Out-Null
+            $vm = Get-VM -Name $currentVMName
             Write-Host "  [PK 3/5] Copying .der certificate file(s) to guest..." -ForegroundColor Cyan
             try {
                 Copy-VMGuestFile -Source $PKDerPath `
