@@ -31,9 +31,9 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 >
 > This script uses the NVRAM rename strategy to resolve 2023 certificate availability in VM UEFI firmware. The approach works by renaming the VM's existing `.nvram` file so that ESXi regenerates it fresh with the updated certificates on next boot.
 >
-> Broadcom previously documented this method in KB 421593. That KB has since been removed from their site with no replacement or explanation. It is not clear whether Broadcom removed it because the method is no longer recommended, because it was superseded by another approach, or for an unrelated reason. The archived version of the KB is linked in the References section below.
+> Broadcom previously documented this method in KB 421593. That KB has since been removed from their site with no replacement or explanation. A Broadcom employee has since stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that deleting or renaming the NVRAM file is **not endorsed by VMware engineering and not supported**. Broadcom has indicated they are working on an official solution. The archived version of KB 421593 is linked in the References section below for historical reference only.
 >
-> This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered in practice. However, because the original documentation no longer exists, this approach may be considered unsupported by Broadcom. Use this script with your own judgment and at your own risk.
+> This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered in practice. However, given the official unsupported position from Broadcom, use this script with your own judgment and at your own risk.
 >
 > If you encounter issues, the script includes rollback options (`-Rollback`) that restore the original NVRAM file and revert to the pre-remediation snapshot. Retaining snapshots during remediation runs (`-RetainSnapshots`) is strongly recommended until you have validated the results.
 
@@ -65,8 +65,8 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
   ```powershell
   Get-VM | Select Name, HardwareVersion | Sort-Object HardwareVersion
   ```
-- Upgrade VM hardware version in vSphere Client (VM must be powered off):
-  **Actions → Compatibility → Upgrade VM Compatibility**
+- The script can upgrade hardware version automatically using `-UpgradeHardware`. This can be run standalone (powers off, upgrades, powers on) or combined with the main remediation run where it runs between steps 2 and 3. See [Hardware Version Upgrade](#hardware-version-upgrade).
+- To upgrade manually via vSphere Client (VM must be powered off): **Actions → Compatibility → Upgrade VM Compatibility**
 
 ### VMware Tools
 - **VMware Tools must be installed, running, and recognized by vCenter** on all target VMs
