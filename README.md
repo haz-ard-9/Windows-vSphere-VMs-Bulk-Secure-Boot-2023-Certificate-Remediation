@@ -194,6 +194,8 @@ Place the file in the same directory as the script. The relative path
 
 ## Usage
 
+On every run the script displays a support status notice in yellow referencing the official Broadcom position on the NVRAM rename approach and prompts for acknowledgement before proceeding. Pass `-Confirm` to suppress this prompt for unattended or scheduled runs.
+
 ### Prepare credentials
 
 ```powershell
@@ -309,7 +311,7 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-Assess` | `switch` | Read-only assessment mode. No changes are made to any VM. Collects current state for all target VMs and produces a CSV and console summary. See [Assessment Mode](#assessment-mode). Mutually exclusive with all action modes. |
 | `-UpgradeHardware` | `switch` | Upgrades VM hardware version to the latest supported by the host. Can be used standalone (powers off, upgrades, powers on - no cert work) or combined with the main remediation run, where it is inserted between step 2 and step 3. See [Hardware Version Upgrade](#hardware-version-upgrade). |
 | `-CleanupHWSnapshots` | `switch` | Removes all `Pre-HWUpgrade*` snapshots created by standalone `-UpgradeHardware` runs. Run after verifying the hardware upgrade is stable. Does not require `-GuestCredential`. |
-| `-Confirm` | `switch` | Suppresses the "Continue? (Y/N)" datastore space confirmation prompt. Use for unattended or scheduled runs when you have already verified sufficient datastore space. |
+| `-Confirm` | `switch` | Suppresses all interactive confirmation prompts including the support status acknowledgement and the datastore space confirmation. Use for unattended or scheduled runs. |
 
 ---
 
