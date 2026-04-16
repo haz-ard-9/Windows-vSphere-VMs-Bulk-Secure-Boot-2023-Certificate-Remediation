@@ -90,7 +90,7 @@ Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided.
 
 ### PowerShell & Modules
 - **PowerShell 5.1 or later** (Windows) or **PowerShell 7+** (cross-platform)
-- **VMware PowerCLI** module (see [Installing PowerCLI](#installing-powercli) below)
+- **VMware PowerCLI** module (`VCF.PowerCLI` for new installs, `VMware.PowerCLI` for existing installations) (see [Installing PowerCLI](#installing-powercli) below)
 
 ---
 
@@ -100,11 +100,17 @@ PowerCLI is VMware's PowerShell module for managing vSphere infrastructure.
 It must be installed on the machine you run this script from - it does not need
 to be installed on the VMs themselves.
 
+There are currently two module names available depending on your version. `VMware.PowerCLI` is the traditional module and will produce a deprecation warning on newer installations. `VCF.PowerCLI` is the current replacement and offers performance improvements. Both provide the same functionality needed by this script. If you are doing a fresh install, `VCF.PowerCLI` is recommended. If you already have `VMware.PowerCLI` installed and it is working, there is no requirement to switch.
+
 ### Install from the PowerShell Gallery (recommended)
 
 Open PowerShell as Administrator and run:
 
 ```powershell
+# Current module (recommended for new installs)
+Install-Module -Name VCF.PowerCLI -Scope CurrentUser
+
+# Legacy module (still functional, deprecation warning may appear)
 Install-Module -Name VMware.PowerCLI -Scope CurrentUser
 ```
 
@@ -113,19 +119,23 @@ If prompted about an untrusted repository, type `Y` to confirm.
 To install for all users on the machine instead:
 
 ```powershell
-Install-Module -Name VMware.PowerCLI -Scope AllUsers
+Install-Module -Name VCF.PowerCLI -Scope AllUsers
 ```
 
 ### Verify the installation
 
 ```powershell
+# If using VCF.PowerCLI
+Get-Module -Name VCF.PowerCLI -ListAvailable
+
+# If using VMware.PowerCLI
 Get-Module -Name VMware.PowerCLI -ListAvailable
 ```
 
 ### Update an existing installation
 
 ```powershell
-Update-Module -Name VMware.PowerCLI
+Update-Module -Name VCF.PowerCLI
 ```
 
 ### Configure PowerCLI (one-time setup)
