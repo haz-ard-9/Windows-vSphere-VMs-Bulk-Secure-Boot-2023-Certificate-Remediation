@@ -939,9 +939,42 @@ To resolve repeated PXE recovery: configure the firmware boot order so the local
 ### Snapshot creation fails
 
 Check available datastore space. Each snapshot consumes space proportional to the
-amount of disk I/O that occurs while it exists. If space is constrained, use
+amount of disk I/O that occurs while it occurs. If space is constrained, use
 `-NoSnapshot` and ensure you have an alternative rollback method (e.g., a storage
 array snapshot or backup taken immediately before running the script).
+
+### Clock drift after NVRAM regeneration
+
+When ESXi regenerates the NVRAM file it resets the virtual RTC. On first boot after
+the regeneration the VM clock loses its timezone offset, so the time may appear
+correct in UTC but be several hours off for the local timezone. NTP sync corrects
+this within a minute or two on most VMs, but during that window the following issues
+can occur:
+
+- Domain-joined VMs will fail Kerberos authentication until the clock corrects,
+  meaning RDP and domain logins will be blocked until NTP syncs
+- Event log timestamps will reflect the wrong time until NTP syncs
+- Time-sensitive services like DHCP failover and database servers may behave
+  unexpectedly during the drift window
+
+For most VMs the NTP sync window is short enough to accept. For time-sensitive VMs
+you can set the following advanced VMX parameter before the first post-regeneration
+boot to pre-configure the correct timezone offset:
+
+```
+rtc.diffFromUTC = <offset in seconds>
+```
+
+For example, UTC-5 (Eastern Standard Time) would be `-18000`. This is a standard
+VMware parameter documented in [Broadcom KB 419717](https://knowledge.broadcom.com/external/article/419717).
+Remove the parameter after the VM has completed NTP sync and is running normally.
+
+**Domain Controllers:** Handle DCs last in your remediation sequence, especially
+the PDC Emulator FSMO role holder. The PDC is the authoritative time source for the
+domain and a clock reset on it can cascade to all domain members. Using
+`rtc.diffFromUTC` on the PDC Emulator before its first post-regeneration boot
+prevents this. Test the parameter on non-DC VMs first to confirm the correct offset
+for your environment before applying it to DCs.
 
 ---
 
