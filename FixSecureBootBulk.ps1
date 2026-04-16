@@ -207,11 +207,11 @@
     .\FixSecureBootBulk.ps1 -CleanupHWSnapshots
 
     # Full remediation including PK enrollment (recommended - download WindowsOEMDevicesPK.der first)
-    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
+    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der"
 
     # Full remediation with PK enrollment and BitLocker key backup
-    .\FixSecureBootBulk.ps1 -VMListCsv ".batch1.csv" -GuestCredential $cred `
+    .\FixSecureBootBulk.ps1 -VMListCsv ".atch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
         -BitLockerBackupShare "\\fileserver\BitLockerKeys"
 
@@ -276,7 +276,7 @@ param(
     [switch]$UpgradeHardware
 )
 
-$ScriptVersion = "v1.7.1 / 2026-03-30"
+$ScriptVersion = "v1.7.2 / 2026-04-16"
 
 # =============================================================================
 # PARAMETER VALIDATION
@@ -352,6 +352,26 @@ $isMainMode         = -not $CleanupSnapshots -and -not $CleanupHWSnapshots -and 
 $isStandaloneUpgrade = $UpgradeHardware -and -not $GuestCredential
 
 Write-Host "FixSecureBootBulk.ps1 $ScriptVersion" -ForegroundColor Cyan
+
+# Support status notice
+Write-Host ""
+Write-Host "  IMPORTANT: Support Status Notice" -ForegroundColor Yellow
+Write-Host "  =================================" -ForegroundColor Yellow
+Write-Host "  A Broadcom employee has stated in the Broadcom community forums that" -ForegroundColor Yellow
+Write-Host "  renaming or deleting the NVRAM file used by this script is NOT endorsed" -ForegroundColor Yellow
+Write-Host "  by VMware engineering and is NOT supported. Broadcom is working on an" -ForegroundColor Yellow
+Write-Host "  official solution. Use this script at your own risk." -ForegroundColor Yellow
+Write-Host "  Reference: https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change" -ForegroundColor Gray
+Write-Host ""
+
+if (-not $Confirm) {
+    $ack = Read-Host "  I understand and accept the risk. Continue? (Y/N)"
+    if ($ack -notmatch '^[Yy]') {
+        Write-Host "Aborted." -ForegroundColor Red
+        return
+    }
+}
+Write-Host ""
 if ($isMainMode -and -not $GuestCredential) {
     $GuestCredential = Get-Credential -Message "Guest OS credentials (domain admin)"
 }
@@ -1174,6 +1194,16 @@ foreach ($k in $evts.Keys) { $r[$k] = $evts[$k].ToString() }
 $bl = Get-BitLockerVolume | Where-Object { $_.ProtectionStatus -eq "On" }
 $r["BitLockerActive"] = ($null -ne $bl -and @($bl).Count -gt 0).ToString()
 
+# Secure-Boot-Update task registration status
+$sbuTask = Get-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update" -EA SilentlyContinue
+if ($null -ne $sbuTask) {
+    $r["SBUTaskStatus"] = "Registered"
+} elseif (Test-Path "C:\Windows\System32\Tasks\Microsoft\Windows\PI\Secure-Boot-Update") {
+    $r["SBUTaskStatus"] = "NotRegistered_XMLPresent"
+} else {
+    $r["SBUTaskStatus"] = "NotRegistered_XMLMissing"
+}
+
 $r | ConvertTo-Json -Compress
 '@
 
@@ -1280,8 +1310,28 @@ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
 $val = Get-ItemPropertyValue -Path $regPath -Name "AvailableUpdates" -EA SilentlyContinue
 Write-Host "AvailableUpdates set to: 0x$("{0:X4}" -f $val)"
 
-Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
-Write-Host "Secure-Boot-Update task triggered"
+# Verify Secure-Boot-Update task is registered in COM database before triggering.
+# On VMs cloned from Sysprep templates the XML may exist on disk but the task
+# may not be registered in the Task Scheduler COM database. Start-ScheduledTask
+# returns silently with no error in this case making the failure invisible.
+$sbuTask = Get-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update" -EA SilentlyContinue
+if ($null -eq $sbuTask) {
+    $xmlPath = "C:\Windows\System32\Tasks\Microsoft\Windows\PI\Secure-Boot-Update"
+    if (Test-Path $xmlPath) {
+        Write-Host "Secure-Boot-Update task not registered - re-registering from XML..."
+        Register-ScheduledTask -Xml (Get-Content $xmlPath -Raw) -TaskName "Secure-Boot-Update" -TaskPath "\Microsoft\Windows\PI" -Force | Out-Null
+        $sbuTask = Get-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update" -EA SilentlyContinue
+        if ($null -eq $sbuTask) { Write-Host "TASK_REREGISTER_FAILED" } else { Write-Host "Task re-registered successfully." }
+    } else {
+        Write-Host "TASK_XML_MISSING"
+    }
+}
+if ($null -ne $sbuTask) {
+    Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+    Write-Host "Secure-Boot-Update task triggered"
+} else {
+    Write-Host "Secure-Boot-Update task not triggered - task not registered and re-registration failed."
+}
 Start-Sleep -Seconds 30
 
 $val = Get-ItemPropertyValue -Path $regPath -Name "AvailableUpdates" -EA SilentlyContinue
@@ -1290,8 +1340,20 @@ Write-Host "AvailableUpdates after task: 0x$("{0:X4}" -f $val)"
 
 # Trigger update task after reboot
 $taskTriggerScript = @'
-Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
-Write-Host "Secure-Boot-Update task triggered (post-reboot)"
+$sbuTask = Get-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update" -EA SilentlyContinue
+if ($null -eq $sbuTask) {
+    $xmlPath = "C:\Windows\System32\Tasks\Microsoft\Windows\PI\Secure-Boot-Update"
+    if (Test-Path $xmlPath) {
+        Register-ScheduledTask -Xml (Get-Content $xmlPath -Raw) -TaskName "Secure-Boot-Update" -TaskPath "\Microsoft\Windows\PI" -Force | Out-Null
+        $sbuTask = Get-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update" -EA SilentlyContinue
+    }
+}
+if ($null -ne $sbuTask) {
+    Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+    Write-Host "Secure-Boot-Update task triggered (post-reboot)"
+} else {
+    Write-Host "Secure-Boot-Update task not triggered - task not registered (post-reboot)."
+}
 Start-Sleep -Seconds 30
 $val = Get-ItemPropertyValue "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot" `
     -Name "AvailableUpdates" -EA SilentlyContinue
@@ -1620,6 +1682,7 @@ if ($Assess) {
             Evt1803          = "Not collected"
             Evt1808          = "Not collected"
             BitLockerActive  = "Not collected"
+            SBUTaskStatus    = "Not collected"
             ActionNeeded     = ""
             Notes            = ""
         }
@@ -1671,13 +1734,18 @@ if ($Assess) {
                 $row.Evt1801 = $aData.Evt1801; $row.Evt1802 = $aData.Evt1802
                 $row.Evt1803 = $aData.Evt1803; $row.Evt1808 = $aData.Evt1808
                 $row.BitLockerActive = $aData.BitLockerActive
+                $row.SBUTaskStatus   = $aData.SBUTaskStatus
 
                 Write-Host "  UEFICA2023Status : $($row.UEFICA2023Status)" -ForegroundColor $(switch ($row.UEFICA2023Status.ToLower()) { "updated" {"Green"} "in progress" {"Yellow"} default {"Red"} })
                 Write-Host "  AvailableUpdates : $($row.AvailableUpdates)"
                 Write-Host "  KEK 2023 : $($row.KEK_2023) | DB 2023: $($row.DB_2023) | PK: $($row.PK_Status)"
                 Write-Host "  Evt1808  : $($row.Evt1808) | Evt1799: $($row.Evt1799) | Evt1801: $($row.Evt1801) | Evt1803: $($row.Evt1803) | Evt1795: $($row.Evt1795)"
+                $taskColor = if ($row.SBUTaskStatus -eq "Registered") { "Green" } elseif ($row.SBUTaskStatus -eq "NotRegistered_XMLPresent") { "Yellow" } else { "Red" }
+                Write-Host "  SBU Task : $($row.SBUTaskStatus)" -ForegroundColor $taskColor
                 if ($row.UEFICA2023Error) { Write-Host "  RegError : $($row.UEFICA2023Error)" -ForegroundColor Red }
                 if ($aData.BitLockerActive -eq "True") { $row.Notes += "BitLocker active. " }
+                if ($row.SBUTaskStatus -eq "NotRegistered_XMLPresent") { $row.Notes += "Secure-Boot-Update task not registered in COM database (Sysprep/template clone artifact) - script will re-register automatically. " }
+                if ($row.SBUTaskStatus -eq "NotRegistered_XMLMissing")  { $row.Notes += "Secure-Boot-Update task XML missing - cumulative update may be required (minimum KB5044284 for WS2025). " }
             } catch {
                 $row.Notes += "Guest data collection failed: $($_.Exception.Message) "
                 Write-Warning "  Guest collection failed: $($_.Exception.Message)"
@@ -1706,6 +1774,8 @@ if ($Assess) {
             if ($row.Evt1802 -eq "True")                                          { $actions.Add("OEM firmware update (Evt 1802)") }
             if ($row.Evt1795 -eq "True")                                          { $actions.Add("OEM firmware update (Evt 1795)") }
             if ($row.Evt1797 -eq "True")                                          { $actions.Add("Boot manager update failed (Evt 1797) - check firmware") }
+            if ($row.SBUTaskStatus -eq "NotRegistered_XMLPresent")               { $actions.Add("SBU task not registered (Sysprep artifact) - script will re-register automatically") }
+            if ($row.SBUTaskStatus -eq "NotRegistered_XMLMissing")               { $actions.Add("SBU task XML missing - cumulative update required") }
             if ($actions.Count -eq 0 -and $row.UEFICA2023Status -eq "updated") { $actions.Add("None - complete") }
             elseif ($actions.Count -eq 0 -and $row.UEFICA2023Status -eq "Not collected") { $actions.Add("Run with -GuestCredential for full assessment") }
         }
