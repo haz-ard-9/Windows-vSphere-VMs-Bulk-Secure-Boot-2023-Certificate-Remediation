@@ -43,6 +43,15 @@
     path - the -Rollback mode will still restore the .nvram_old file if one
     exists, but cannot revert VM state (registry changes etc.).
 
+.PARAMETER SkipNVRAMRename
+    Skip the NVRAM rename step (steps 2-4) entirely. The VM will not be powered
+    off, the NVRAM file will not be renamed, and ESXi will not regenerate the
+    NVRAM. Use this when the KEK 2023 certificate is already present in the VM's
+    NVRAM (e.g. VMs created on ESXi 8.0.2+ or already remediated via another
+    method) and you only want to use the script for cert update triggering and
+    PK enrollment. This avoids any risk associated with NVRAM file manipulation.
+    The script will proceed directly to step 5 (cert update trigger).
+
 .PARAMETER Confirm
     Suppress the "Continue? (Y/N)" prompt and proceed automatically. Use this
     when running the script unattended or in a scheduled task, and you have
@@ -84,6 +93,16 @@
       - Powers the VM back on
     Does not require -GuestCredential. If no snapshot exists the NVRAM is
     still restored, but VM state (registry changes etc.) will not be reverted.
+
+.PARAMETER BitLockerBackupShare
+    UNC path to a writable file share for BitLocker recovery key backups. When
+    provided, VMs with active BitLocker are processed rather than skipped. The
+    script exports all recovery keys to the share as VMName_BitLockerKeys_<timestamp>.txt
+    before making any changes, aborts if the backup fails, then suspends BitLocker
+    for the duration of the remediation. If PK remediation also runs (step 9),
+    a second backup and suspension are performed before the SetupMode reboot.
+    Without this parameter, any VM with active BitLocker is skipped with a warning.
+    Example: \\fileserver\BitLockerKeys
 
 .PARAMETER PKDerPath
     Path to WindowsOEMDevicesPK.der downloaded from the Microsoft secureboot_objects
@@ -238,6 +257,43 @@
     .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
         -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -UpgradeHardware
 
+    # Skip NVRAM rename - use for VMs already created on ESXi 8.0.2+ or previously
+    # remediated via another method (cert update triggering and PK enrollment only)
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -SkipNVRAMRename
+
+    # Full remediation with BitLocker key backup to a file share
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
+        -BitLockerBackupShare "\\fileserver\BitLockerKeys"
+
+    # Specify vCenter server on the command line (avoids prompt)
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -vCenter "vcenter.yourdomain.com"
+
+    # Connect to a vCenter with a self-signed or untrusted certificate
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -IgnoreCertificateWarnings
+
+    # Increase Tools wait timeout for slow-booting VMs (default 90 seconds)
+    .\FixSecureBootBulk.ps1 -VMName "slow-vm" -GuestCredential $cred `
+        -RetainSnapshots -WaitSeconds 180
+
+    # Increase graceful shutdown timeout (default 120 seconds); use 0 to always
+    # force hard power off without waiting for guest OS shutdown
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -GracefulShutdownTimeout 180
+
+    # Add a delay between VMs for co-dependent workloads (e.g. DB then app server)
+    .\FixSecureBootBulk.ps1 -VMName "AppDB01","AppServer01" -GuestCredential $cred `
+        -RetainSnapshots -InterVMDelay 120
+
+    # Provide a KEK certificate manually (only needed if KEK 2023 is absent after
+    # NVRAM regeneration - should not be required on ESXi 8.0.2+)
+    .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+        -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" `
+        -KEKDerPath ".\KEK-2023.der"
+
 .NOTES
     Do not include domain controllers in automated runs - handle DCs manually.
     VMs with BitLocker active will be skipped unless -BitLockerBackupShare is
@@ -258,6 +314,7 @@ param(
     [string]$VMListCsv,
     [PSCredential]$GuestCredential,
     [switch]$NoSnapshot,
+    [switch]$SkipNVRAMRename,
     [switch]$Confirm,
     [switch]$RetainSnapshots,
     [switch]$CleanupSnapshots,
@@ -276,7 +333,7 @@ param(
     [switch]$UpgradeHardware
 )
 
-$ScriptVersion = "v1.7.2 / 2026-04-16"
+$ScriptVersion = "v1.7.3 / 2026-04-24"
 
 # =============================================================================
 # PARAMETER VALIDATION
@@ -359,9 +416,11 @@ Write-Host "  IMPORTANT: Support Status Notice" -ForegroundColor Yellow
 Write-Host "  =================================" -ForegroundColor Yellow
 Write-Host "  A Broadcom employee has stated in the Broadcom community forums that" -ForegroundColor Yellow
 Write-Host "  renaming or deleting the NVRAM file used by this script is NOT endorsed" -ForegroundColor Yellow
-Write-Host "  by VMware engineering and is NOT supported. Broadcom is working on an" -ForegroundColor Yellow
-Write-Host "  official solution. Use this script at your own risk." -ForegroundColor Yellow
+Write-Host "  by VMware engineering and is NOT supported. Broadcom KB 423919 has since" -ForegroundColor Yellow
+Write-Host "  been updated to explicitly warn that deleting NVRAM can lead to unexpected" -ForegroundColor Yellow
+Write-Host "  corruptions of the associated VM. Use this script at your own risk." -ForegroundColor Yellow
 Write-Host "  Reference: https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change" -ForegroundColor Gray
+Write-Host "  Reference: https://knowledge.broadcom.com/external/article/423919" -ForegroundColor Gray
 Write-Host ""
 
 if (-not $Confirm) {
@@ -2605,7 +2664,11 @@ foreach ($vm in $vms) {
         # ------------------------------------------------------------------
         # Step 2 - Power off (skipped if NVRAM already has 2023 certs)
         # ------------------------------------------------------------------
-        if ($entryStep -notin @("skipNvram","skipToStep6","certDone")) {
+        if ($SkipNVRAMRename -and $entryStep -notin @("skipToStep6","certDone")) {
+            Write-Host "  [Pre] -SkipNVRAMRename specified - skipping power off/rename/power on (steps 2-4)." -ForegroundColor Yellow
+            Write-Host "        Proceeding directly to cert update trigger (step 5)." -ForegroundColor Yellow
+            $row.NVRAMRenamed = "Skipped"
+        } elseif ($entryStep -notin @("skipNvram","skipToStep6","certDone")) {
         Write-Host "  [2/9] Powering off..." -ForegroundColor Cyan
         if ($vm.PowerState -eq "PoweredOn") {
             Stop-VMGraceful -VM $vm -TimeoutSeconds $GracefulShutdownTimeout
