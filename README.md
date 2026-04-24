@@ -10,11 +10,11 @@ Server 2016, 2019, 2022, and 2025, as well as Windows 10 and 11.
 >
 > This script uses the NVRAM rename strategy to resolve 2023 certificate availability in VM UEFI firmware. The approach works by renaming the VM's existing `.nvram` file so that ESXi regenerates it fresh with the updated certificates on next boot.
 >
-> Broadcom previously documented this method in KB 421593. That KB has since been removed from their site with no replacement or explanation. **A Broadcom employee has since stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that deleting or renaming the NVRAM file is not endorsed by VMware engineering and not supported. Broadcom has indicated they are working on an official solution.** The archived version of KB 421593 is linked in the References section below for historical reference only.
+> Broadcom previously documented this method in KB 421593. That KB has since been removed. **A Broadcom employee has stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that deleting or renaming the NVRAM file is not endorsed by VMware engineering and not supported. Broadcom has indicated they are working on an official solution.** Subsequently, [KB 423919](https://knowledge.broadcom.com/external/article/423919/manual-update-of-secure-boot-variables-i.html) was updated to explicitly state that it replaces KB 421593 specifically **"to avoid suggestions of deleting NVRAM, as that behavior can lead to unexpected corruptions of the associated VM."** The archived version of KB 421593 is linked in the References section below for historical reference only.
 >
-> This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered in practice. However, given the official unsupported position from Broadcom, use this script with your own judgment and at your own risk.
+> This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered by myself or the community that has used this script in practice. However, given the official unsupported position from Broadcom and the explicit corruption warning in KB 423919, use this script with your own judgment and at your own risk.
 >
-> If you encounter issues, the script includes rollback options (`-Rollback`) that restore the original NVRAM file and revert to the pre-remediation snapshot. Retaining snapshots during remediation runs (`-RetainSnapshots`) is strongly recommended until you have validated the results.
+> If you encounter issues, the script includes rollback options (`-Rollback`) that restore the original NVRAM file and revert to the pre-remediation snapshot. Retaining snapshots during remediation runs (`-RetainSnapshots`) is strongly recommended until you have validated the results. Users who wish to use the script's other capabilities (BitLocker backup, hardware version upgrade, cert update triggering, PK enrollment) without performing the NVRAM rename can use the `-SkipNVRAMRename` parameter.
 
 ---
 
@@ -259,6 +259,11 @@ $cred = Get-Credential  # Admin account with guest OS access
 .\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
     -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -Confirm
 
+# Skip NVRAM rename - use for VMs that already have 2023 KEK in NVRAM
+# (e.g. created on ESXi 8.0.2+ or previously remediated via another method)
+.\FixSecureBootBulk.ps1 -VMListCsv ".\batch1.csv" -GuestCredential $cred `
+    -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -SkipNVRAMRename
+
 # Process co-dependent VMs with a delay between each to allow services to start
 .\FixSecureBootBulk.ps1 -VMName "AppDB01","AppServer01" -GuestCredential $cred `
     -RetainSnapshots -PKDerPath ".\WindowsOEMDevicesPK.der" -InterVMDelay 120
@@ -306,6 +311,7 @@ so you can feed it back in to run cleanup on exactly the same set of VMs:
 | `-VMListCsv` | `string` | Path to a CSV file with a `VMName` column. |
 | `-GuestCredential` | `PSCredential` | Admin credential for guest OS access. Required for main mode. |
 | `-NoSnapshot` | `switch` | Skip snapshot creation. Cannot be combined with `-RetainSnapshots`. |
+| `-SkipNVRAMRename` | `switch` | Skip the NVRAM rename step (steps 2-4) entirely. The VM will not be powered off, the NVRAM file will not be renamed, and ESXi will not regenerate the NVRAM. Use when the KEK 2023 certificate is already present in the VM's NVRAM (e.g. VMs created on ESXi 8.0.2+ or already remediated via another method) and you only want cert update triggering and PK enrollment. Avoids any risk associated with NVRAM file manipulation. The script proceeds directly to step 5. |
 | `-RetainSnapshots` | `switch` | Keep snapshots even on success. Use with `-CleanupSnapshots` later. |
 | `-CleanupSnapshots` | `switch` | Remove all `Pre-SecureBoot-Fix*` snapshots on target VMs. |
 | `-CleanupNvram` | `switch` | Delete all `.nvram_old` files left on target VM datastores. |
