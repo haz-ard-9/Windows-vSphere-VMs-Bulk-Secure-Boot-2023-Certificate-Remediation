@@ -333,7 +333,7 @@ param(
     [switch]$UpgradeHardware
 )
 
-$ScriptVersion = "v1.7.3 / 2026-04-24"
+$ScriptVersion = "v1.7.4 / 2026-05-04"
 
 # =============================================================================
 # PARAMETER VALIDATION
@@ -2239,8 +2239,8 @@ if ($Rollback) {
     Write-Warning "exists - NVRAM restore alone does not undo registry changes."
     Write-Host ""
 
-    $confirm = Read-Host "Proceed with rollback? (Y/N)"
-    if ($confirm -notmatch '^[Yy]') { Write-Host "Aborted."; return }
+    $proceedRollback = Read-Host "Proceed with rollback? (Y/N)"
+    if ($proceedRollback -notmatch '^[Yy]') { Write-Host "Aborted."; return }
 
     $rollbackReport = [System.Collections.Generic.List[PSObject]]::new()
 
