@@ -10,7 +10,9 @@ Server 2016, 2019, 2022, and 2025, as well as Windows 10 and 11.
 >
 > This script uses the NVRAM rename strategy to resolve 2023 certificate availability in VM UEFI firmware. The approach works by renaming the VM's existing `.nvram` file so that ESXi regenerates it fresh with the updated certificates on next boot.
 >
-> Broadcom previously documented this method in KB 421593. That KB has since been removed. **A Broadcom employee has stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that deleting or renaming the NVRAM file is not endorsed by VMware engineering and not supported. Broadcom has indicated they are working on an official solution.** Subsequently, [KB 423919](https://knowledge.broadcom.com/external/article/423919/manual-update-of-secure-boot-variables-i.html) was updated to explicitly state that it replaces KB 421593 specifically **"to avoid suggestions of deleting NVRAM, as that behavior can lead to unexpected corruptions of the associated VM."** The archived version of KB 421593 is linked in the References section below for historical reference only.
+> Broadcom previously documented this method in KB 421593. That KB has since been removed. **A Broadcom employee has stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that deleting or renaming the NVRAM file is not endorsed by VMware engineering and not supported.** Subsequently, [KB 423919](https://knowledge.broadcom.com/external/article/423919/manual-update-of-secure-boot-variables-i.html) was updated to explicitly state that it replaces KB 421593 specifically **"to avoid suggestions of deleting NVRAM, as that behavior can lead to unexpected corruptions of the associated VM."** The archived version of KB 421593 is linked in the References section below for historical reference only.
+>
+> **ESXi 8.0 P09 (released May 27, 2026 as part of ESXi 8.0 Update 3j) now delivers a supported official solution for vTPM-disabled VMs.** On patched hosts, a simple guest OS reboot automatically updates the PK with no NVRAM rename or manual intervention required. For vTPM-enabled VMs, the `uefi.secureBoot.PK.resetOnce` VMX parameter is now the officially supported path. See [Broadcom KB 423893](https://knowledge.broadcom.com/external/article/423893) for full details. If your hosts are already on 8.0 P09 or later, consider following Broadcom's official guidance directly. If you do use this script on P09+ hosts, the smart step detection will automatically skip the NVRAM rename for any VM that already has the 2023 KEK in NVRAM, so there is no risk of an unnecessary rename on VMs that were already remediated via the official path.
 >
 > This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered by myself or the community that has used this script in practice. However, given the official unsupported position from Broadcom and the explicit corruption warning in KB 423919, use this script with your own judgment and at your own risk.
 >
@@ -26,15 +28,21 @@ with Secure Boot enabled after that date.
 
 VMs created before ESXi 8.0.2 have a NULL Platform Key (PK) signature in their
 NVRAM that prevents the standard certificate enrollment process from working. The
-fix is to delete the VM's NVRAM file and let ESXi regenerate it - ESXi 8.0.2 and
+fix is to delete the VM's NVRAM file and let ESXi regenerate it. ESXi 8.0.2 and
 later automatically populate the new NVRAM with the 2023 certificates. Windows can
 then detect and install them without requiring manual firmware enrollment.
 
 Per [Broadcom KB 423893](https://knowledge.broadcom.com/external/article/423893), after the June 2026 expiry VMs will continue to boot normally since Secure Boot verification does not check certificate expiration. The practical impact is that new DB and DBX update payloads signed solely by the 2023 KEK will fail on VMs that are still missing the 2023 KEK, and OS-driven KEK updates will fail on any VM without a valid PK. Existing payloads signed during the 2011 certificates' valid period continue to work regardless of expiry.
 
-**Platform Key (PK) note:** Even after NVRAM regeneration, ESXi 8.x writes a placeholder PK (`VMW.NULLPK`) rather than a proper Microsoft-signed key. ESXi 9.x newly created VMs receive the `WindowsOEMDevicesPK` automatically. Per KB 423893, Broadcom is working on automated PK update methods for ESXi 8.x in future patches, including silent PK update for vTPM-disabled VMs and capsule-based update for vTPM-enabled Windows VMs. Until those patches are available, the script can enroll the correct Windows OEM Devices PK via UEFI SetupMode when `-PKDerPath` is provided. The script detects placeholder PK status (`Valid_Other`) automatically.
+**ESXi 8.0 P09 (ESXi 8.0 Update 3j, released May 27, 2026):** Broadcom has released the first official automated PK remediation solution. On hosts running 8.0 P09 or later:
 
-**Important:** Per [KB 423893](https://knowledge.broadcom.com/external/article/423893), PK enrollment requires **hardware version 14 or later**. Hardware version 21 is required for NVRAM regeneration to include the 2023 KEK and DB certificates. VMs on version 13 must be upgraded to at least 14 before PK enrollment is possible, and to 21 before NVRAM regeneration will include the 2023 certs.
+- **vTPM-disabled VMs:** The PK is updated automatically during a guest OS reboot. No NVRAM rename or manual steps required. Simply patch your ESXi hosts to 8.0 P09 and reboot the VMs.
+- **vTPM-enabled VMs:** Use the `uefi.secureBoot.PK.resetOnce = TRUE` VMX advanced parameter while the VM is powered off, then power it on. This is the officially supported manual path. Broadcom recommends waiting for a forthcoming capsule-based automated solution for vTPM-enabled Windows VMs.
+- **Newly created VMs on 8.0 P09+:** Will receive the `WindowsOEMDevicesPK` automatically.
+
+If your hosts are already on 8.0 P09 or later, the NVRAM rename performed by this script may not be necessary. Consider using `-SkipNVRAMRename` with `-PKDerPath` to trigger the cert update and PK enrollment without renaming the NVRAM file, or follow Broadcom's official guidance directly.
+
+**Platform Key (PK) note:** On ESXi 8.x builds prior to P09, NVRAM regeneration writes a placeholder PK (`VMW.NULLPK`) rather than a proper Microsoft-signed key. This placeholder PK will not authenticate future Windows Update KEK changes. Per [KB 423893](https://knowledge.broadcom.com/external/article/423893), PK enrollment requires **hardware version 14 or later**. Hardware version 21 is required for NVRAM regeneration to include the 2023 KEK and DB certificates. VMs on version 13 must be upgraded to at least 14 before PK enrollment is possible, and to 21 before NVRAM regeneration will include the 2023 certs.
 
 
 ---
