@@ -1,41 +1,240 @@
 # Changelog
 
-All notable changes to FixSecureBootBulk.ps1 and its companion documentation,
-through v1.7.7.
+All notable changes to FixSecureBootBulk.ps1 and its companion documentation.
 
-This file documents the project history up to and including v1.7.7.
-
-The project began before a version banner was introduced. Entries dated earlier
+This project began before a version banner was introduced. Entries dated earlier
 than v1.5 (the first version to carry a `$ScriptVersion` string) are labeled by
 date only, matching how they were actually published. From v1.5 onward, entries
 are labeled by the version string the script reported at release.
 
-## Documentation (post-v1.7.7, doc-only)
+## [2.0.0] - 2026-06-18
 
-After v1.7.7, the documentation on the default branch received P09-related updates
-with no change to the v1.7.7 script. These notes are included in this frozen
-package because they describe how ESXi 8.0 P09 affects use of the v1.7.7 script:
+Major release, validated on pre-P09 and post-P09 hosts. Adds new operating
+modes, stricter safety gates, vendor-guidance alignment, robust Platform Key
+validation, and a documentation reframing. Review before upgrading from a 1.7.x
+deployment. Consolidates all work since v1.7.7.
 
-- Added an "Important notice regarding support status" to the README, the DC guide,
-  and the no-script manual guide. It records that Broadcom's prior NVRAM guidance
-  (KB 421593) was removed and replaced by KB 423919 "to avoid suggestions of
-  deleting NVRAM, as that behavior can lead to unexpected corruptions of the
-  associated VM," that a Broadcom employee stated in the community forums that
-  renaming or deleting the NVRAM file is not endorsed by VMware engineering, and
-  that ESXi 8.0 P09 (released May 27, 2026 as part of 8.0 Update 3j) now provides
-  an officially supported PK remediation path: a guest OS reboot for vTPM-disabled
-  VMs. Broadcom documents the `uefi.secureBoot.PK.resetOnce` VMX method for
-  Linux/non-Windows vTPM-enabled VMs, while vTPM-enabled Windows VMs should wait
-  for the planned capsule-based automated solution per KB 423893.
-- The notice explains that on P09+ hosts, when guest credentials are supplied, the
-  script's smart pre-check can verify the 2023 KEK is already present in NVRAM and
-  skips the rename for that VM, so there is no unnecessary rename on VMs already
-  remediated via the official path. In no-credential hypervisor-only mode (which
-  v1.7.7 made possible by making `-GuestCredential` optional) the script cannot
-  inspect guest certificate state, so `-SkipNVRAMRename` should be used for any VM
-  already remediated through the official P09 path. The notice also reiterates the
-  rollback options (`-Rollback`, `-RetainSnapshots`, `-SkipNVRAMRename`) for using
-  the script with judgment and at your own risk.
+### Breaking Changes
+
+- **`-UpgradeHardware` behavior changed.** It no longer performs a standalone
+  hardware-only upgrade. It now adds a hardware upgrade step (2b) inside the main
+  remediation sequence. Use the new `-UpgradeHardwareOnly` switch for a
+  hardware-only run.
+- **vTPM-enabled Windows VMs are skipped for PK remediation by default.** VMX-based
+  PK changes occur outside the guest OS's awareness and can trigger BitLocker
+  recovery or break TPM-sealed secrets. Broadcom recommends waiting for the
+  planned capsule-based automated solution. Override with
+  `-AllowUnsupportedVTPMWindowsPKRemediation`.
+- **BitLocker now fails closed in more cases.** A VM is skipped (rather than
+  proceeding) when: no RecoveryPassword protector exists on an active-protected
+  volume, key backup fails, suspension fails or is partial, or the suspension
+  script returns no parseable status. New `Skipped_BitLockerSuspendFailed` status.
+- **Powered-off VMs are skipped by default.** BitLocker and guest state cannot be
+  verified safely on a powered-off VM. Override with `-AllowPoweredOffVMRemediation`.
+- **Snapshot failure now fails closed.** If a pre-remediation snapshot cannot be
+  created, the VM is skipped entirely rather than proceeding with NVRAM
+  manipulation that would have no rollback path. New `Skipped_SnapshotFailed`
+  status. The failure reason is captured in the terminal output and the CSV
+  `Notes` column. Applies to the main remediation path and `-UpgradeHardwareOnly`.
+- **CSV output columns changed.** Added `CertUpdateVerified`, `FullyRemediated`,
+  `BitLockerSkipped`, the PK identity columns `PK_Subject`, `PK_Issuer`,
+  `PK_Thumbprint`, `PK_Serial`, `PK_NotAfter`, and the method-tracking columns
+  `PKMethod` and `CertMethod`. A `ScriptVersion` column is prefixed to every
+  export.
+
+### New Features
+
+- **Hypervisor-only mode (no `-GuestCredential`).** NVRAM rename, hardware
+  upgrade, and snapshot management run without guest credentials. Guest-side
+  steps are deferred. Re-run with `-GuestCredential` to complete cert update and
+  PK enrollment. Status `HypervisorOnly_GuestStepsPending`.
+- **`-UpgradeHardwareOnly`**: standalone hardware-version upgrade to HW21.
+  Restores original power state (VMs already off stay off).
+- **`-AllowNonWindowsTargets`**: allow targeting non-Windows VMs in
+  hypervisor-only mode. Cannot be combined with `-GuestCredential`.
+- **`-SupportedMethodsOnly`**: refuse the unsupported NVRAM regeneration and
+  restrict PK remediation to the paths the script performs without it: the silent
+  update on P09 vTPM-disabled Windows VMs (Broadcom's official path per KB 423893)
+  and the SetupMode fallback (SetupMode reaches the same end state as the manual
+  vUEFI method in KB 423919 but is the script's own implementation rather than the
+  KB's manual workflow, and is labeled `SetupMode_KB423919` in `PKMethod`). The
+  `resetOnce` VMX path is Broadcom-documented for Linux and other non-Windows
+  VMs but is not automated by this script. Drives KEK/DB through in-guest OS
+  servicing only, and reports a cert-absent VM the guest cannot service with
+  `FinalStatus = NeedsOSNativeUpdate` rather
+  than force-remediating it. Also refuses
+  `-AllowUnsupportedVTPMWindowsPKRemediation`, since vTPM-enabled Windows PK
+  updates remain unsupported per KB 423893. A superset of `-SkipNVRAMRename`,
+  which suppresses the same regeneration but keeps the override available.
+- **ESXi 8.0 P09 PK paths.** On P09+ hosts (build 25429389+), vTPM-disabled
+  Windows VMs use the official silent PK update on guest reboot, including
+  BitLocker-active volumes, which are suspended before the reboot and resumed
+  after (a vTPM-disabled volume has no PCR seal, so the PK change cannot trigger
+  recovery). Windows/unknown-risk vTPM VMs are skipped by default unless
+  `-AllowUnsupportedVTPMWindowsPKRemediation` is supplied. SetupMode is the
+  fallback. Known Linux/non-Windows guests are not remediated guest-side by this
+  script. Use `-Assess` or `-AllowNonWindowsTargets` for identification and
+  hypervisor-only preparation, then follow Broadcom KB 423893 or OS-vendor
+  guidance for `resetOnce` and validation.
+- **ESXi/HW safety gates enforced before mutation.** Host HW21 capability is
+  verified before any snapshot, BitLocker, or power-off action.
+  `Get-MaxHWVersionForHost` returns a fail-safe value for ESXi 8.x builds earlier
+  than 8.0.2.
+- **Stricter cert verification.** `CertUpdateVerified` requires the 2023 KEK and
+  DB confirmed in NVRAM with no `UEFICA2023Error` key. `FullyRemediated`
+  additionally requires a valid PK. Assessment mode uses the same standard.
+- **Transactional rollback.** If NVRAM restore fails after the active `.nvram`
+  was preserved as `.nvram_new`, the script attempts to recover it and refuses to
+  power on a VM with no active NVRAM file.
+- **Cleanup safety.** `.nvram_old` deletion is skipped by default when
+  `Pre-SecureBoot-Fix*` snapshots still exist, and is re-checked after snapshot
+  removal so a failed snapshot cleanup preserves the NVRAM rollback path. Parallel
+  cleanup operations now have per-task timeouts. `-CleanupNvram` also removes
+  orphan `.nvram_new` backups left by a prior `-Rollback` (the rollback preserves
+  the current `.nvram` as `.nvram_new` before restoring `.nvram_old`). Unlike
+  `.nvram_old` these never protect a rollback path and are removed regardless of
+  snapshot state. The post-snapshot rollback-protection re-check is keyed by VM
+  MoRef rather than display name so duplicate VM names cannot cross-protect.
+- **BitLocker resumed on completion (default).** When the script suspended
+  BitLocker on a VM and that VM finishes with the guest reachable, protection is
+  re-enabled as the final step rather than being left on the auto-resume reboot
+  countdown, so the protected state is deterministic at the end of the maintenance
+  window instead of depending on a later reboot to re-arm. The new
+  `-SkipBitLockerResume` switch restores the prior leave-suspended behavior (for
+  example when further maintenance will reboot the VM, or when resuming manually).
+  The resume runs only for VMs this run suspended, only when the guest is
+  reachable, never fails the VM, and is recorded in the CSV `Notes` column.
+
+### PK Validation
+
+- **PK DER integrity verification.** The file supplied via `-PKDerPath` is
+  verified against the known SHA-256 of Microsoft's published
+  `WindowsOEMDevicesPK.der` before enrollment. A mismatch (corrupted, wrong, or
+  substituted file) causes the script to refuse to enroll the PK and stop. The new
+  `-AllowUnverifiedPKDer` switch bypasses the check for intentional custom or
+  organizational PK enrollment, and the bypass is recorded in the CSV. The KEK DER
+  has the same mechanism available but its hash is not pinned by default.
+  `-KEKDerPath` now requires `-PKDerPath` (KEK enrollment happens only during the
+  PK SetupMode path, so there is no KEK-only mode).
+- **Certificate-exact PK control.** `-ExpectedPKThumbprint` compares the PK
+  thumbprint against an operator-supplied value at every point the script reads or
+  accepts a PK (already-remediated pre-check, step 8 already-valid, P09 silent
+  reboot, P09 resetOnce, and SetupMode post-enrollment). After SetupMode enrollment
+  a mismatch is a hard failure. On an existing valid PK a mismatch is not a failure:
+  the VM has a working PK, so the script reports the existing PK's identity and
+  leaves it in place (not counted as `FullyRemediated`) so the operator can decide
+  whether to replace it. The new `-ReplaceExistingPK` switch (with `-PKDerPath` and
+  `-ExpectedPKThumbprint`) makes a valid-but-non-matching PK eligible for SetupMode
+  re-enrollment against the expected certificate, without bypassing the vTPM-Windows
+  skip or the BitLocker fail-closed checks.
+- **PK classification rewritten to parse certificates properly.** The previous
+  approach scanned the raw PK variable bytes for the ASCII substrings "Windows OEM
+  Devices" and "Microsoft", which was brittle (the "Microsoft" match in particular
+  was far too broad). The PK variable is now parsed as an EFI_SIGNATURE_LIST: the
+  signature-type GUID is validated against EFI_CERT_X509_GUID, the certificate
+  offset is computed from the signature-list header (rather than a fixed 44-byte
+  skip), and the embedded certificate is loaded as an X509Certificate2 and
+  classified by its Subject. A populated PK whose contents are not a parseable
+  X.509 certificate (the ESXi placeholder) is correctly reported as `Valid_Other`.
+  `Valid_WindowsOEM` is the expected VMware remediation target. `Valid_Microsoft`
+  is accepted as a valid-looking Microsoft-subject PK.
+- **PK certificate identity recorded.** The `PK_Subject`, `PK_Issuer`,
+  `PK_Thumbprint`, `PK_Serial`, and `PK_NotAfter` columns capture the parsed
+  certificate identity from the live firmware at assessment, the step 8 PK check,
+  and post-enrollment verification.
+- **New `CheckFailed` PK status** distinguishes a `Get-SecureBootUEFI` read failure
+  from a genuinely absent PK (`Invalid_NULL`).
+- **Custom/organizational PK support.** When `-AllowUnverifiedPKDer` and
+  `-ExpectedPKThumbprint` are both supplied and the post-enrollment thumbprint
+  matches, a non-Microsoft PK is accepted as remediated with a distinct
+  `Valid_CustomExpected` status (so it is not confused with the ESXi placeholder
+  `Valid_Other`). Without an expected thumbprint, a non-Microsoft PK classifies as
+  `Valid_Other` and is not counted as remediated.
+- **Summary buckets distinguish a valid-but-nonmatching PK from an enrollment
+  failure.** A PK that is a genuine valid certificate but does not match
+  `-ExpectedPKThumbprint` (and was not replaced) is reported as "PK valid,
+  mismatch" rather than "PK enroll failed."
+- **Inert-switch rejection.** `-AllowUnverifiedPKDer`, `-ExpectedPKThumbprint`, and
+  `-ReplaceExistingPK` are rejected in `-Assess`, `-UpgradeHardwareOnly`, cleanup,
+  and rollback modes, consistent with the existing handling of `-PKDerPath` and
+  `-KEKDerPath`.
+
+### Behavior
+
+- **Graded Event 1801 handling.** Event 1801 ("updated certificates available but
+  not yet applied to firmware") is a normal intermediate state during a
+  multi-reboot sequence, so its presence alone is no longer treated as failure. A
+  VM is flagged `NeedsAttention_1801` only when 1801 persists after the step 7b
+  extra reboot while Event 1808 is absent and the registry state is not `Updated`.
+  These VMs are reported distinctly, do not count as `FullyRemediated`, and retain
+  their snapshot.
+- **Rollback confirms a restore target before powering off.** `-Rollback` now
+  checks for a `.nvram_old` backup or a `Pre-SecureBoot-Fix*` snapshot before it
+  powers a VM off. A VM with neither is left in its current power state and
+  reported as skipped (`Skipped - nothing to roll back`), instead of being
+  powered off, found to have nothing to restore, and powered back on as in
+  v1.7.7. A VM whose `.nvram_old` presence cannot be verified due to a datastore
+  read error, and that has no snapshot, is also left untouched
+  (`Skipped - could not verify rollback targets`). The rollback summary adds a
+  skipped tally.
+- **Successful snapshot rollback no longer mislabeled.** A VM that reverts its
+  `Pre-SecureBoot-Fix` snapshot but where the `.nvram_old` file restore was not
+  needed (the snapshot revert already restored NVRAM) is now reported as
+  `Rolled Back (via snapshot, NVRAM file restore not needed)`. In v1.7.7 the same
+  outcome fell through to `Partial - NVRAM not restored`, a false negative on a
+  rollback that actually succeeded.
+- **`-Confirm` suppresses the rollback prompt.** `-Confirm` is a custom switch
+  that suppresses the script's interactive confirmation prompts and proceeds
+  automatically (the inverse of the standard PowerShell `-Confirm` convention).
+  In v1.7.7 it suppressed the other confirmation prompts but not the `-Rollback`
+  confirmation, which always required interactive input. v2.0.0 extends
+  `-Confirm` to the rollback prompt as well, so `-Rollback -Confirm` runs
+  unattended.
+
+### Reliability
+
+- All guest-script JSON extraction routed through a null-safe `Get-LastJsonLine`
+  helper to behave correctly under `Set-StrictMode`.
+- `Set-VMXOption` uses `ReconfigVM_Task` with task wait, error propagation, and a
+  timeout.
+- `SecureBoot\Servicing` diagnostics (`UEFICA2023Status`, `UEFICA2023Error`,
+  `UEFICA2023ErrorEvent`, `AvailableUpdates`) are read and logged before the
+  Servicing subkey is cleared for a retry, preserving the evidence needed to
+  diagnose a stuck update.
+- Scheduled task trigger uses the split
+  `Start-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update"`
+  form, matching the `Get-ScheduledTask` checks and the PowerShell object model.
+- Snapshot removal failures are now reflected accurately in `SnapshotRetained`.
+- VM refresh standardized on MoRef Id rather than display name to avoid
+  mis-targeting when duplicate VM names exist.
+
+### Documentation
+
+- Reframed positioning: the tool is presented as an assessment and orchestration
+  aid with a recommended remediation hierarchy (assess, supported Broadcom path,
+  Microsoft certificate deployment, manual Broadcom PK remediation, NVRAM rename as
+  an unsupported field-tested fallback) rather than a default bulk NVRAM fix. New
+  "Recommended Approach" section.
+- vTPM Windows vs. Linux wording corrected throughout: `resetOnce` is documented as
+  the Broadcom path for Linux/non-Windows vTPM-enabled VMs only. Windows
+  vTPM-enabled VMs are skipped by default pending Broadcom's automated solution.
+- Companion guides (no-script and DC) hardened to match the script: robust EFI
+  signature list + X.509 PK classification, Servicing diagnostics preserved before
+  the key is cleared (both DC sections as well as the no-script guide), corrected
+  Linux/non-Windows `resetOnce` wording, split `Start-ScheduledTask` form, and
+  manual post-enrollment PK verification that compares the live PK thumbprint
+  against the enrolled DER thumbprint. The post-enrollment expected-output text was
+  reconciled to the `PK VERIFIED` message the snippet actually prints.
+- DC rollback caution added: reverting a domain controller snapshot is an Active
+  Directory recovery event (VM-Generation ID, InvocationID reset, RID pool
+  discard) and not routine cleanup.
+- README background corrected so it no longer describes NVRAM deletion as "the
+  fix". It is framed as a historical, now-unsupported workaround.
+- Added the exact 2011 certificate expiration dates (per Microsoft KB 5062710,
+  updated May 18, 2026) to the README, the script header NOTES, and both manual
+  guides: KEK CA 2011 (June 24, 2026), UEFI CA 2011 (June 27, 2026), and
+  Windows Production PCA 2011 (October 19, 2026).
+- Removed em dashes from README and CHANGELOG for consistency.
 
 ## [1.7.7] - 2026-05-12
 
