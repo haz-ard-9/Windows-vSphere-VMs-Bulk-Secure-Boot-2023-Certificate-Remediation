@@ -3,13 +3,25 @@
 ## Background
 
 Microsoft's Secure Boot certificate chain that protects the Windows pre-OS boot
-process uses signing certificates that begin expiring in **June 2026**. Devices
-that are not updated to trust the new 2023 certificates before that date will
-lose the ability to receive future Secure Boot and boot manager security updates.
+process uses signing certificates that begin expiring in **June 2026**. The exact
+dates, per
+[Microsoft KB 5062710](https://support.microsoft.com/en-us/help/5062710)
+(updated May 18, 2026):
 
-For VMware virtual machines, Windows cannot apply this update on its own because
-the certificates live in the VM's NVRAM - a firmware-level file managed by ESXi,
-not by Windows. The process therefore has two distinct phases:
+| Expiring 2011 certificate | Expiration date | Replacement 2023 certificate | Store |
+|---|---|---|---|
+| Microsoft Corporation KEK CA 2011 | June 24, 2026 | Microsoft Corporation KEK 2K CA 2023 | KEK |
+| Microsoft UEFI CA 2011 | June 27, 2026 | Microsoft UEFI CA 2023 | DB |
+| Microsoft UEFI CA 2011 | June 27, 2026 | Microsoft Option ROM UEFI CA 2023 | DB |
+| Microsoft Windows Production PCA 2011 | October 19, 2026 | Windows UEFI CA 2023 | DB |
+
+The KEK CA 2011 expiration (June 24, 2026) is the near-term driver: it is the
+certificate that signs DB and DBX updates. Devices that are not updated to trust
+the new 2023 certificates before these dates continue to boot and operate normally,
+but lose the ability to receive future Secure Boot and boot manager security
+updates (Windows Boot Manager, Secure Boot database, and revocation updates).
+
+For affected VMware VMs that still lack the 2023 KEK in NVRAM and are not using an applicable Broadcom-supported P09 path, Windows cannot apply this update on its own because the certificates live in the VM's NVRAM - a firmware-level file managed by ESXi, not by Windows. This manual fallback procedure therefore has two distinct phases:
 
 1. **ESXi phase:** Rename the VM's NVRAM file so ESXi regenerates it fresh with
    the 2023 certificates on next boot. The original file is preserved as
@@ -24,7 +36,7 @@ not by Windows. The process therefore has two distinct phases:
 
 > ## Important notice regarding support status
 >
-> This guide includes a step that renames the VM's `.nvram` file to force ESXi to regenerate it fresh with the 2023 KEK certificate on next boot. Broadcom previously documented this approach in [KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) *(archived - Broadcom has removed this KB)*. A Broadcom employee has stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that renaming or deleting the NVRAM file is **not endorsed by VMware engineering and not supported**. **ESXi 8.0 P09 (May 27, 2026) now delivers an official automated PK remediation solution for vTPM-disabled VMs via a simple guest OS reboot, and the `uefi.secureBoot.PK.resetOnce` VMX parameter for vTPM-enabled VMs. If your hosts are on 8.0 P09 or later, consider following [Broadcom KB 423893](https://knowledge.broadcom.com/external/article/423893) directly instead.** Subsequently, [KB 423919](https://knowledge.broadcom.com/external/article/423919/manual-update-of-secure-boot-variables-i.html) was updated to explicitly state that it replaces KB 421593 specifically **"to avoid suggestions of deleting NVRAM, as that behavior can lead to unexpected corruptions of the associated VM."** This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered by the community that has used this approach in practice. Given the official unsupported position from Broadcom and the explicit corruption warning in KB 423919, use this guide with your own judgment and at your own risk.
+> This guide includes a step that renames the VM's `.nvram` file to force ESXi to regenerate it fresh with the 2023 KEK certificate on next boot. Broadcom previously documented this approach in [KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) *(archived - Broadcom has removed this KB)*. A Broadcom employee has stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that renaming or deleting the NVRAM file is **not endorsed by VMware engineering and not supported**. **ESXi 8.0 P09 (May 27, 2026) now delivers an official automated PK remediation solution for vTPM-disabled VMs via a simple guest OS reboot. For vTPM-enabled Linux and other non-Windows VMs, Broadcom documents the `uefi.secureBoot.PK.resetOnce` VMX method. For vTPM-enabled Windows VMs, Broadcom currently recommends waiting for the forthcoming capsule-based automated solution rather than using the VMX method, since changing the PK from outside the guest OS can trigger BitLocker recovery or break TPM-sealed secrets. If your hosts are on 8.0 P09 or later, consider following [Broadcom KB 423893](https://knowledge.broadcom.com/external/article/423893) directly instead.** Subsequently, [KB 423919](https://knowledge.broadcom.com/external/article/423919/manual-update-of-secure-boot-variables-i.html) was updated to explicitly state that it replaces KB 421593 specifically **"to avoid suggestions of deleting NVRAM, as that behavior can lead to unexpected corruptions of the associated VM."** This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered by the community that has used this approach in practice. Given the official unsupported position from Broadcom and the explicit corruption warning in KB 423919, use this guide with your own judgment and at your own risk.
 >
 > The NVRAM file is **renamed** rather than deleted so that rollback is possible - the original file is preserved as `.nvram_old`. A snapshot is also taken at Step 1 before any changes are made. If you encounter any issues, the Rollback Procedure at the end of this guide will restore the original NVRAM and revert the VM to its pre-change state.
 >
@@ -58,13 +70,13 @@ investigate failures:
 | Event ID **1043** (TPM-WMI) | Windows Event Viewer -> System log | Success - KEK 2K CA 2023 applied |
 | Event ID **1044** (TPM-WMI) | Windows Event Viewer -> System log | Success - Microsoft Option ROM UEFI CA 2023 added to DB |
 | Event ID **1045** (TPM-WMI) | Windows Event Viewer -> System log | Success - Microsoft UEFI CA 2023 added to DB |
-| Event ID **1795** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - firmware returned error on Secure Boot variable write; contact OEM |
-| Event ID **1797** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - boot manager update failed; check firmware |
+| Event ID **1795** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - firmware returned error on Secure Boot variable write, contact OEM |
+| Event ID **1797** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - boot manager update failed, check firmware |
 | Event ID **1799** (TPM-WMI) | Windows Event Viewer -> System log | Success - boot manager signed by Windows UEFI CA 2023 applied |
 | Event ID **1800** (TPM-WMI) | Windows Event Viewer -> System log | Warning - reboot required before Secure Boot update can proceed |
-| Event ID **1801** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - certificates updated but not yet applied to firmware; device still needs attention |
-| Event ID **1802** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - update blocked by known firmware issue; contact OEM for firmware update |
-| Event ID **1803** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - no PK-signed KEK found; PK remediation (Step 12) is required |
+| Event ID **1801** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - certificates updated but not yet applied to firmware, device still needs attention |
+| Event ID **1802** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - update blocked by known firmware issue, contact OEM for firmware update |
+| Event ID **1803** (TPM-WMI) | Windows Event Viewer -> System log | ERROR - no PK-signed KEK found, PK remediation (Step 12) is required |
 | Event ID **1808** (TPM-WMI) | Windows Event Viewer -> System log | Success - all certificates and boot manager applied to firmware (definitive success) |
 
 **How to find these events in Event Viewer:**
@@ -92,7 +104,7 @@ on the guest. No `.ps1` script files are required.
 - ESXi host must be **8.0.2 or later** - earlier versions will not regenerate
   NVRAM with 2023 certificates
 - VM hardware version must be **13 or later**
-- **VMware Tools must be installed and running** on the VM - required for vSphere Client to show power state and for guest operations to complete correctly. Tools should be current with your ESXi host version; outdated Tools can cause guest script execution to fail. Check status in vSphere Client under the VM Summary tab, or with PowerCLI:
+- **VMware Tools must be installed and running** on the VM - required for vSphere Client to show power state and for guest operations to complete correctly. Tools should be current with your ESXi host version. Outdated Tools can cause guest script execution to fail. Check status in vSphere Client under the VM Summary tab, or with PowerCLI:
   ```powershell
   (Get-VM "vmname").Guest.ExtensionData.ToolsStatus  # Expected: toolsOk
   (Get-VM "vmname").Guest.ToolsVersion               # Compare against ESXi bundled version
@@ -242,6 +254,16 @@ certificates on the next boot. The VM must be **powered off** before doing this.
 
 5. Locate the file ending in `.nvram` (e.g., `vmname.nvram`)
    - There should be only one `.nvram` file - do not touch any other files
+
+> **Before renaming, check for an existing `.nvram_old` file.** If a file named
+> `vmname.nvram_old` is already present in this folder, **stop**. It is most likely
+> a rollback copy from a previous partial attempt, and it is the only way to
+> restore the original firmware state. Do not overwrite or delete it. Roll back
+> first (see the Rollback Procedure at the end of this guide), or remove the
+> `.nvram_old` file only if you have confirmed you intentionally no longer need
+> that rollback copy. Proceed with the rename below only once no `.nvram_old`
+> file exists.
+
 6. Right-click the `.nvram` file → **Rename**
 7. Change the name by appending `_old` to the extension:
    - Example: `vmname.nvram` → `vmname.nvram_old`
@@ -261,7 +283,7 @@ file has been successfully renamed to `.nvram_old`.
 ## Step 5 - Power On and Verify 2023 Certificates in New NVRAM
 
 1. Right-click the VM → **Power** → **Power On**
-2. Wait 2–3 minutes for the VM to fully boot and for VMware Tools to report
+2. Wait 2-3 minutes for the VM to fully boot and for VMware Tools to report
    **Running**. You can monitor this in the VM's **Summary** tab.
 
 ### Verify the 2023 Certificates Are Present
@@ -290,7 +312,39 @@ Expected result: `True`
 
 ```
 $pk = Get-SecureBootUEFI -Name PK
-if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 44) { Write-Host "PK Status: Invalid_NULL" -ForegroundColor Red } else { $t = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)]); if ($t -match 'Windows OEM Devices') { Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green } elseif ($t -match 'Microsoft') { Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green } else { Write-Host "PK Status: Valid_Other (ESXi placeholder - PK remediation will be needed at Step 12)" -ForegroundColor Yellow } }
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 28) {
+    Write-Host "PK Status: Invalid_NULL (no PK present)" -ForegroundColor Red
+} else {
+    $b = $pk.Bytes
+    $sigType = [Guid]([byte[]]$b[0..15])
+    if ($sigType -ne [Guid]"a5c059a1-94e4-4aa7-87b5-ab155c2bf072") {
+        Write-Host "PK Status: Valid_Other (populated but not an X.509 certificate - typically the ESXi placeholder)" -ForegroundColor Yellow
+    } else {
+        $hdr   = [BitConverter]::ToUInt32($b, 20)
+        $size  = [BitConverter]::ToUInt32($b, 24)
+        $start = 28 + [int]$hdr + 16
+        $len   = [int]$size - 16
+        try {
+            $certBytes = New-Object byte[] $len
+            [Array]::Copy($b, $start, $certBytes, 0, $len)
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+            Write-Host ("PK Subject   : {0}" -f $cert.Subject)
+            Write-Host ("PK Issuer    : {0}" -f $cert.Issuer)
+            Write-Host ("PK Thumbprint: {0}" -f $cert.Thumbprint)
+            Write-Host ("PK Serial    : {0}" -f $cert.SerialNumber)
+            Write-Host ("PK NotAfter  : {0}" -f $cert.NotAfter.ToString("yyyy-MM-dd"))
+            if ($cert.Subject -match 'CN=Windows OEM Devices PK') {
+                Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green
+            } elseif ($cert.Subject -match 'O=Microsoft Corporation' -or $cert.Subject -match 'CN=Microsoft') {
+                Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green
+            } else {
+                Write-Host "PK Status: Valid_Other (real certificate, not a recognized Microsoft PK)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "PK Status: Valid_Other (certificate could not be parsed)" -ForegroundColor Yellow
+        }
+    }
+}
 ```
 
 Note the PK status now. If it shows `Valid_Other` or `Invalid_NULL` and you
@@ -320,7 +374,26 @@ commands **one at a time**:
 Test-Path "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing"
 ```
 
-If the above returns `True`, run:
+If the above returns `True`, first record the current servicing diagnostics
+before clearing them. Microsoft uses these values to determine where an update
+is stuck, so capture them in case you need to troubleshoot a failure later:
+
+```
+$svcPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing"
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
+Write-Host "UEFICA2023Status     : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Status' -EA SilentlyContinue))"
+Write-Host "UEFICA2023Error      : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Error' -EA SilentlyContinue))"
+Write-Host "UEFICA2023ErrorEvent : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023ErrorEvent' -EA SilentlyContinue))"
+Write-Host "AvailableUpdates     : $((Get-ItemPropertyValue -Path $regPath -Name 'AvailableUpdates' -EA SilentlyContinue))"
+```
+
+Optionally export the whole Secure Boot key to a file first:
+
+```
+reg export "HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot" "$env:TEMP\SecureBoot-preclear.reg" /y
+```
+
+Then remove the stale subkey:
 
 ```
 Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing" -Recurse -Force
@@ -381,7 +454,7 @@ schedule, trigger it immediately.
    **Task Scheduler Library** → **Microsoft** → **Windows** → **PI**
 3. In the center panel, locate **Secure-Boot-Update**
 4. Right-click **Secure-Boot-Update** → **Run**
-5. Wait 30–60 seconds for the task to complete
+5. Wait 30-60 seconds for the task to complete
 6. The **Last Run Result** column should update to `0x0` (success) or a
    status code indicating it ran
 
@@ -406,7 +479,7 @@ Restart-Computer -Force
 
 Or via **Start** → **Power** → **Restart**.
 
-Wait for the VM to fully come back online (2–3 minutes). Confirm you can
+Wait for the VM to fully come back online (2-3 minutes). Confirm you can
 authenticate before continuing.
 
 ---
@@ -417,7 +490,7 @@ Log back into the guest. Open **Task Scheduler**:
 
 1. **Task Scheduler Library** → **Microsoft** → **Windows** → **PI**
 2. Right-click **Secure-Boot-Update** → **Run**
-3. Wait 30–60 seconds
+3. Wait 30-60 seconds
 
 Check `AvailableUpdates` in **regedit** again:
 `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates`
@@ -521,7 +594,39 @@ $pk = Get-SecureBootUEFI -Name PK
 Then type:
 
 ```
-if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 44) { Write-Host "PK Status: Invalid_NULL" -ForegroundColor Red } else { $t = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)]); if ($t -match 'Windows OEM Devices') { Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green } elseif ($t -match 'Microsoft') { Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green } else { Write-Host "PK Status: Valid_Other (ESXi placeholder - remediation required)" -ForegroundColor Yellow } }
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 28) {
+    Write-Host "PK Status: Invalid_NULL (no PK present)" -ForegroundColor Red
+} else {
+    $b = $pk.Bytes
+    $sigType = [Guid]([byte[]]$b[0..15])
+    if ($sigType -ne [Guid]"a5c059a1-94e4-4aa7-87b5-ab155c2bf072") {
+        Write-Host "PK Status: Valid_Other (populated but not an X.509 certificate - typically the ESXi placeholder)" -ForegroundColor Yellow
+    } else {
+        $hdr   = [BitConverter]::ToUInt32($b, 20)
+        $size  = [BitConverter]::ToUInt32($b, 24)
+        $start = 28 + [int]$hdr + 16
+        $len   = [int]$size - 16
+        try {
+            $certBytes = New-Object byte[] $len
+            [Array]::Copy($b, $start, $certBytes, 0, $len)
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+            Write-Host ("PK Subject   : {0}" -f $cert.Subject)
+            Write-Host ("PK Issuer    : {0}" -f $cert.Issuer)
+            Write-Host ("PK Thumbprint: {0}" -f $cert.Thumbprint)
+            Write-Host ("PK Serial    : {0}" -f $cert.SerialNumber)
+            Write-Host ("PK NotAfter  : {0}" -f $cert.NotAfter.ToString("yyyy-MM-dd"))
+            if ($cert.Subject -match 'CN=Windows OEM Devices PK') {
+                Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green
+            } elseif ($cert.Subject -match 'O=Microsoft Corporation' -or $cert.Subject -match 'CN=Microsoft') {
+                Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green
+            } else {
+                Write-Host "PK Status: Valid_Other (real certificate, not a recognized Microsoft PK)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "PK Status: Valid_Other (certificate could not be parsed)" -ForegroundColor Yellow
+        }
+    }
+}
 ```
 
 **If PK Status is `Valid_WindowsOEM` or `Valid_Microsoft`:** Skip to Step 13.
@@ -597,7 +702,7 @@ Set the SetupMode VMX option:
 
 Power the VM back on:
 1. Right-click the VM → **Power** → **Power On**
-2. Wait 2–3 minutes for the VM to fully boot
+2. Wait 2-3 minutes for the VM to fully boot
 
 ### 12d - Copy WindowsOEMDevicesPK.der to the Guest
 
@@ -679,21 +784,47 @@ Restart-Computer -Force
 ```
 
 After the VM fully comes back online, open an elevated PowerShell console
-and type:
+and verify the enrolled PK. This compares the live Platform Key in firmware
+against the `WindowsOEMDevicesPK.der` you downloaded, using the certificate
+thumbprint, which is a stronger check than matching the subject name.
+
+Set the path to the DER file you enrolled, then run the verification block:
+
+```
+$derPath = "C:\Path\To\WindowsOEMDevicesPK.der"   # set to the file you enrolled
+```
 
 ```
 $pk = Get-SecureBootUEFI -Name PK
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 28) {
+    Write-Host "PK Status: Invalid_NULL - enrollment did not take" -ForegroundColor Red
+} else {
+    $b = $pk.Bytes
+    $sigType = [Guid]([byte[]]$b[0..15])
+    if ($sigType -ne [Guid]"a5c059a1-94e4-4aa7-87b5-ab155c2bf072") {
+        Write-Host "PK Status: Valid_Other (not an X.509 certificate) - enrollment did not take" -ForegroundColor Red
+    } else {
+        $hdr   = [BitConverter]::ToUInt32($b, 20)
+        $size  = [BitConverter]::ToUInt32($b, 24)
+        $start = 28 + [int]$hdr + 16
+        $len   = [int]$size - 16
+        $certBytes = New-Object byte[] $len
+        [Array]::Copy($b, $start, $certBytes, 0, $len)
+        $live = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+        $der  = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($derPath)
+        Write-Host ("Live PK Subject   : {0}" -f $live.Subject)
+        Write-Host ("Live PK Thumbprint: {0}" -f $live.Thumbprint)
+        Write-Host ("DER  Thumbprint   : {0}" -f $der.Thumbprint)
+        if ($live.Thumbprint -eq $der.Thumbprint) {
+            Write-Host "PK VERIFIED: live Platform Key matches the enrolled certificate." -ForegroundColor Green
+        } else {
+            Write-Host "PK MISMATCH: live Platform Key does NOT match the DER you enrolled. Enrollment may have failed or a different key is present." -ForegroundColor Red
+        }
+    }
+}
 ```
 
-```
-$t = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)])
-```
-
-```
-if ($t -match 'Windows OEM Devices') { Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green } elseif ($t -match 'Microsoft') { Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green } else { Write-Host "PK Status: Valid_Other - enrollment may not have succeeded" -ForegroundColor Red }
-```
-
-Expected: `PK Status: Valid_WindowsOEM`
+Expected: `PK VERIFIED: live Platform Key matches the enrolled certificate.`
 
 If status is still `Valid_Other`, the enrollment did not take effect. Verify:
 - SetupMode was active (Step 12e returned `1`) before running the enrollment
