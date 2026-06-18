@@ -10,20 +10,30 @@ Domain controllers require manual handling due to UAC restrictions that prevent
 both DCs but must be performed **sequentially** - complete and verify DC1
 entirely before touching DC2 (the PDC Emulator holder).
 
+This remediation enrolls the Microsoft 2023 Secure Boot certificates before the
+2011 certificates expire. Per
+[Microsoft KB 5062710](https://support.microsoft.com/en-us/help/5062710)
+(updated May 18, 2026), the relevant dates are: Microsoft Corporation KEK CA 2011
+expires **June 24, 2026** (the near-term driver, as it signs DB/DBX updates).
+Microsoft UEFI CA 2011 expires **June 27, 2026**. Microsoft Windows Production
+PCA 2011 expires **October 19, 2026**. DCs continue to boot normally after expiry,
+but lose future Secure Boot and boot-manager security updates until the 2023
+certificates are enrolled.
+
 **Order of operations:**
 1. **DC1** (secondary / no FSMO roles) - lower risk, process first
 2. **DC2** (PDC Emulator holder) - after DC1 is confirmed healthy, transfer PDC Emulator role first
 
-**Time required per DC:** Approximately 45–60 minutes including reboots. Add
-15–20 minutes if PK remediation is required.
+**Time required per DC:** Approximately 45-60 minutes including reboots. Add
+15-20 minutes if PK remediation is required.
 
 > Substitute your actual DC hostnames for `DC1` and `DC2` throughout this guide.
 
 **Prerequisites:**
 - ESXi host must be on **8.0.2 or later** - earlier versions will not regenerate NVRAM with 2023 certificates
 - VM hardware version must be **13 or later** - required for EFI/Secure Boot support
-- VM hardware version must be **21 or later** - required for ESXi to populate regenerated NVRAM with the 2023 KEK certificate; upgrade hardware version before proceeding if below 21
-- **VMware Tools must be installed and running** on the DC - required for `Invoke-VMScript` to verify NVRAM cert presence after power-on. Tools should be current with your ESXi host version; outdated Tools can cause guest script execution to fail silently. Check status in vSphere Client or with PowerCLI:
+- VM hardware version must be **21 or later** - required for ESXi to populate regenerated NVRAM with the 2023 KEK certificate. Upgrade hardware version before proceeding if below 21
+- **VMware Tools must be installed and running** on the DC - required for `Invoke-VMScript` to verify NVRAM cert presence after power-on. Tools should be current with your ESXi host version. Outdated Tools can cause guest script execution to fail silently. Check status in vSphere Client or with PowerCLI:
   ```powershell
   (Get-VM "DC1").Guest.ExtensionData.ToolsStatus  # Expected: toolsOk
   (Get-VM "DC1").Guest.ToolsVersion               # Compare against ESXi bundled version
@@ -39,7 +49,7 @@ entirely before touching DC2 (the PDC Emulator holder).
 
 > ## Important notice regarding support status
 >
-> This guide includes a step that renames the VM's `.nvram` file to force ESXi to regenerate it fresh with the 2023 KEK certificate on next boot. Broadcom previously documented this approach in [KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) *(archived - Broadcom has removed this KB)*. A Broadcom employee has stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that renaming or deleting the NVRAM file is **not endorsed by VMware engineering and not supported**. **ESXi 8.0 P09 (May 27, 2026) now delivers an official automated PK remediation solution for vTPM-disabled VMs via a simple guest OS reboot, and the `uefi.secureBoot.PK.resetOnce` VMX parameter for vTPM-enabled VMs. If your hosts are on 8.0 P09 or later, consider following [Broadcom KB 423893](https://knowledge.broadcom.com/external/article/423893) directly instead.** Subsequently, [KB 423919](https://knowledge.broadcom.com/external/article/423919/manual-update-of-secure-boot-variables-i.html) was updated to explicitly state that it replaces KB 421593 specifically **"to avoid suggestions of deleting NVRAM, as that behavior can lead to unexpected corruptions of the associated VM."** This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered by the community that has used this approach in practice. Given the official unsupported position from Broadcom and the explicit corruption warning in KB 423919, use this guide with your own judgment and at your own risk.
+> This guide includes a step that renames the VM's `.nvram` file to force ESXi to regenerate it fresh with the 2023 KEK certificate on next boot. Broadcom previously documented this approach in [KB 421593](https://web.archive.org/web/20260212085158/https://knowledge.broadcom.com/external/article/421593/missing-microsoft-corporation-kek-ca-202.html) *(archived - Broadcom has removed this KB)*. A Broadcom employee has stated in the [Broadcom community forums](https://community.broadcom.com/vmware-cloud-foundation/discussion/uefi-2023-fully-automated-script-also-with-plattform-key-change) that renaming or deleting the NVRAM file is **not endorsed by VMware engineering and not supported**. **ESXi 8.0 P09 (May 27, 2026) now delivers an official automated PK remediation solution for vTPM-disabled VMs via a simple guest OS reboot. For vTPM-enabled Linux and other non-Windows VMs, Broadcom documents the `uefi.secureBoot.PK.resetOnce` VMX method. For vTPM-enabled Windows VMs, Broadcom currently recommends waiting for the forthcoming capsule-based automated solution rather than using the VMX method, since changing the PK from outside the guest OS can trigger BitLocker recovery or break TPM-sealed secrets. If your hosts are on 8.0 P09 or later, consider following [Broadcom KB 423893](https://knowledge.broadcom.com/external/article/423893) directly instead.** Subsequently, [KB 423919](https://knowledge.broadcom.com/external/article/423919/manual-update-of-secure-boot-variables-i.html) was updated to explicitly state that it replaces KB 421593 specifically **"to avoid suggestions of deleting NVRAM, as that behavior can lead to unexpected corruptions of the associated VM."** This method has been tested and works reliably on ESXi 8.0.2 and later with hardware version 21 VMs. No issues have been encountered by the community that has used this approach in practice. Given the official unsupported position from Broadcom and the explicit corruption warning in KB 423919, use this guide with your own judgment and at your own risk.
 >
 > The NVRAM file is **renamed** rather than deleted so that rollback is possible - the original file is preserved as `.nvram_old`. A snapshot is also taken before any changes are made. If you encounter any issues, reverting to the snapshot will restore the original NVRAM and return the DC to its pre-change state.
 >
@@ -49,7 +59,7 @@ entirely before touching DC2 (the PDC Emulator holder).
 
 ## KEK Pre-Check (Do This First)
 
-Before touching the NVRAM, check whether the 2023 KEK certificate is already present. If it is, skip straight to [Phase 1, Step 5](#phase-1-dc1-secondary-domain-controller) - the NVRAM rename and power cycle steps are not needed.
+Before touching the NVRAM, check whether the 2023 KEK certificate is already present. If it is, skip straight to [Phase 1, Step 5](#step-5---apply-registry-fix-directly-on-dc1) - the NVRAM rename and power cycle steps are not needed.
 
 **Option A - PowerShell on the VM** (requires console or RDP access):
 
@@ -186,19 +196,52 @@ $vmxPath = $vmView.Config.Files.VmPathName
 $dsName  = $vmxPath -replace '^\[(.+?)\].*', '$1'
 $vmDir   = $vmxPath -replace '^\[.+?\] (.+)/[^/]+$', '$1'
 
-$ds        = Get-Datastore -Name $dsName
+# Resolve the datastore by MoRef from the VM's own attached-datastore list.
+# Get-Datastore -Name returns every datastore with that name across the
+# inventory, which picks the wrong one when duplicate datastore names exist
+# across datacenters or clusters. Match by MoRef instead, the same way the
+# script does, and fail loudly if the VMX datastore cannot be resolved.
+$ds = $null
+foreach ($dsRef in $vmView.Datastore) {
+    $candidate = Get-Datastore -Id $dsRef -ErrorAction SilentlyContinue
+    if ($candidate -and $candidate.Name -eq $dsName) {
+        $ds = $candidate
+        break
+    }
+}
+if (-not $ds) {
+    throw "Could not resolve VMX datastore '$dsName' from this VM's attached datastore list."
+}
 $dsBrowser = Get-View $ds.ExtensionData.Browser
 $spec      = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
 $spec.MatchPattern = "*.nvram"
 $results   = $dsBrowser.SearchDatastoreSubFolders("[$dsName] $vmDir", $spec)
 $nvramFile = $results.File | Where-Object { $_.Path -notmatch "_old" } | Select-Object -First 1
 
+# Safety: confirm an active .nvram file was actually found before proceeding.
+if (-not $nvramFile) {
+    throw "No active .nvram file found. The VM may already have been renamed or partially rolled back. Stop and investigate."
+}
+
+$oldBackupName = $nvramFile.Path -replace '\.nvram$', '.nvram_old'
+
+# Safety: do NOT overwrite an existing .nvram_old. If one is present, a prior
+# partial attempt likely left it, and it is the only rollback copy. Stop rather
+# than destroy it. (This mirrors the protection the bulk script performs.)
+$oldSpec = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
+$oldSpec.MatchPattern = $oldBackupName
+$oldCheck = $dsBrowser.SearchDatastoreSubFolders("[$dsName] $vmDir", $oldSpec)
+if ($oldCheck -and $oldCheck.File) {
+    throw "$oldBackupName already exists. Stop and investigate before proceeding. Do not overwrite the existing rollback copy - roll back first, or remove the file only if you intentionally no longer need it."
+}
+
 $oldPath = "[$dsName] $vmDir/$($nvramFile.Path)"
-$newPath = "[$dsName] $vmDir/$($nvramFile.Path -replace '\.nvram$', '.nvram_old')"
+$newPath = "[$dsName] $vmDir/$oldBackupName"
 
 $dcRef = (Get-Datacenter -VM $vm | Get-View).MoRef
 $fm    = Get-View (Get-View ServiceInstance).Content.FileManager
-$task  = $fm.MoveDatastoreFile_Task($oldPath, $dcRef, $newPath, $dcRef, $true)
+# Final argument $false = do NOT force-overwrite the destination.
+$task  = $fm.MoveDatastoreFile_Task($oldPath, $dcRef, $newPath, $dcRef, $false)
 
 # Wait for task to complete
 do { Start-Sleep -Seconds 2; $t = Get-View $task } while ($t.Info.State -notin @("success","error"))
@@ -215,7 +258,7 @@ else { Write-Warning "NVRAM rename failed: $($t.Info.Error.LocalizedMessage)" }
 Start-VM -VM $vm
 ```
 
-Wait 2–3 minutes for the DC to fully boot and AD services to start, then verify:
+Wait 2-3 minutes for the DC to fully boot and AD services to start, then verify:
 
 ```powershell
 $verify = @'
@@ -243,8 +286,19 @@ RDP or console into **DC1**. Open PowerShell **as Administrator**
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
 $svcPath = "$regPath\Servicing"
 
-# Clear any stale state from previous failed attempts
+# Before clearing stale state, record the current servicing diagnostics.
+# Microsoft uses these values to determine where a Secure Boot update is stuck,
+# so capture them in case you need to troubleshoot a failure later.
 if (Test-Path $svcPath) {
+    Write-Host "Pre-clear Secure Boot servicing diagnostics:"
+    Write-Host "  UEFICA2023Status     : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Status' -EA SilentlyContinue))"
+    Write-Host "  UEFICA2023Error      : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Error' -EA SilentlyContinue))"
+    Write-Host "  UEFICA2023ErrorEvent : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023ErrorEvent' -EA SilentlyContinue))"
+    Write-Host "  AvailableUpdates     : $((Get-ItemPropertyValue -Path $regPath -Name 'AvailableUpdates' -EA SilentlyContinue))"
+    # Optional stronger preservation - export the whole Secure Boot key first:
+    reg export "HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot" "$env:TEMP\SecureBoot-preclear.reg" /y
+
+    # Clear any stale state from previous failed attempts
     Remove-Item -Path $svcPath -Recurse -Force
     Write-Host "Stale Servicing subkey cleared."
 }
@@ -254,7 +308,7 @@ Set-ItemProperty -Path $regPath -Name "AvailableUpdates" -Value 0x5944 -Type DWo
 Write-Host "AvailableUpdates set: 0x$("{0:X4}" -f (Get-ItemPropertyValue -Path $regPath -Name "AvailableUpdates"))"
 
 # Trigger update task immediately rather than waiting up to 12 hours
-Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+Start-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update"
 Write-Host "Task triggered - waiting 30 seconds..."
 Start-Sleep -Seconds 30
 
@@ -286,7 +340,7 @@ Test-NetConnection -ComputerName DC1 -Port 389  # LDAP
 Log back into DC1 via RDP or console, elevated PowerShell:
 
 ```powershell
-Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+Start-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update"
 Write-Host "Task triggered - waiting 30 seconds..."
 Start-Sleep -Seconds 30
 
@@ -330,13 +384,13 @@ Reg Error key    : Not present (no error)
 | **1043** | Success - KEK 2K CA 2023 applied |
 | **1044** | Success - Microsoft Option ROM UEFI CA 2023 added to DB |
 | **1045** | Success - Microsoft UEFI CA 2023 added to DB |
-| **1795** | ERROR - firmware returned error on variable write; contact OEM for firmware update |
-| **1797** | ERROR - boot manager update failed; check firmware |
+| **1795** | ERROR - firmware returned error on variable write, contact OEM for firmware update |
+| **1797** | ERROR - boot manager update failed, check firmware |
 | **1799** | Success - boot manager signed by Windows UEFI CA 2023 applied |
 | **1800** | Warning - reboot required before Secure Boot update can proceed |
-| **1801** | ERROR - certificates updated but not yet applied to firmware; an additional reboot may be required |
-| **1802** | ERROR - update blocked by known firmware issue; contact OEM for firmware update |
-| **1803** | ERROR - no PK-signed KEK found; PK remediation (Step 9) required |
+| **1801** | ERROR - certificates updated but not yet applied to firmware, an additional reboot may be required |
+| **1802** | ERROR - update blocked by known firmware issue, contact OEM for firmware update |
+| **1803** | ERROR - no PK-signed KEK found, PK remediation (Step 9) required |
 | **1808** | Success - all certificates and boot manager applied to firmware (definitive success) |
 
 Event 1808 may not appear until an extra reboot after the update task completes. Absence of 1808 alone is not a failure indicator - use `UEFICA2023Status = Updated` as the primary completion signal.
@@ -350,14 +404,35 @@ Check the current PK status from DC1 (elevated PowerShell):
 
 ```powershell
 $pk = Get-SecureBootUEFI -Name PK
-if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 44) {
-    Write-Host "PK Status: Invalid_NULL" -ForegroundColor Red
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 28) {
+    Write-Host "PK Status: Invalid_NULL (no PK present)" -ForegroundColor Red
 } else {
-    $t = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)])
-    $s = if ($t -match 'Windows OEM Devices') { "Valid_WindowsOEM" }
-         elseif ($t -match 'Microsoft')        { "Valid_Microsoft"  }
-         else                                  { "Valid_Other"      }
-    Write-Host "PK Status: $s" -ForegroundColor $(if ($s -like "Valid_Windows*" -or $s -eq "Valid_Microsoft") {"Green"} else {"Yellow"})
+    $b = $pk.Bytes
+    $sigType = [Guid]([byte[]]$b[0..15])
+    if ($sigType -ne [Guid]"a5c059a1-94e4-4aa7-87b5-ab155c2bf072") {
+        Write-Host "PK Status: Valid_Other (populated but not an X.509 certificate - typically the ESXi placeholder)" -ForegroundColor Yellow
+    } else {
+        $hdr   = [BitConverter]::ToUInt32($b, 20)
+        $size  = [BitConverter]::ToUInt32($b, 24)
+        $start = 28 + [int]$hdr + 16
+        $len   = [int]$size - 16
+        try {
+            $certBytes = New-Object byte[] $len
+            [Array]::Copy($b, $start, $certBytes, 0, $len)
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+            Write-Host ("PK Subject   : {0}" -f $cert.Subject)
+            Write-Host ("PK Thumbprint: {0}" -f $cert.Thumbprint)
+            if ($cert.Subject -match 'CN=Windows OEM Devices PK') {
+                Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green
+            } elseif ($cert.Subject -match 'O=Microsoft Corporation' -or $cert.Subject -match 'CN=Microsoft') {
+                Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green
+            } else {
+                Write-Host "PK Status: Valid_Other (real certificate, not a recognized Microsoft PK)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "PK Status: Valid_Other (certificate could not be parsed)" -ForegroundColor Yellow
+        }
+    }
 }
 ```
 
@@ -418,7 +493,19 @@ $vmConfig.ExtraConfig = @(
         Value = "SetupMode"
     }
 )
-($vm | Get-View).ReconfigVM($vmConfig)
+# Apply via ReconfigVM_Task and wait for completion (matches the script's behavior;
+# surfaces errors instead of failing silently)
+$view = $vm | Get-View
+$taskMoRef = $view.ReconfigVM_Task($vmConfig)
+$task = Get-View -Id $taskMoRef
+do {
+    Start-Sleep -Seconds 2
+    $task = Get-View -Id $taskMoRef
+} while ($task.Info.State -in @("queued","running"))
+
+if ($task.Info.State -ne "success") {
+    throw "VM reconfiguration failed: $($task.Info.Error.LocalizedMessage)"
+}
 Write-Host "SetupMode VMX option set." -ForegroundColor Green
 
 # Verify
@@ -436,7 +523,7 @@ Start-Sleep -Seconds 5
 Start-VM -VM $vm
 ```
 
-Wait for the DC to fully boot (2–3 minutes) and confirm Tools is running:
+Wait for the DC to fully boot (2-3 minutes) and confirm Tools is running:
 
 ```powershell
 do {
@@ -488,7 +575,19 @@ $vmConfig.ExtraConfig = @(
         Value = ""
     }
 )
-($vm | Get-View).ReconfigVM($vmConfig)
+# Apply via ReconfigVM_Task and wait for completion (matches the script's behavior;
+# surfaces errors instead of failing silently)
+$view = $vm | Get-View
+$taskMoRef = $view.ReconfigVM_Task($vmConfig)
+$task = Get-View -Id $taskMoRef
+do {
+    Start-Sleep -Seconds 2
+    $task = Get-View -Id $taskMoRef
+} while ($task.Info.State -in @("queued","running"))
+
+if ($task.Info.State -ne "success") {
+    throw "VM reconfiguration failed: $($task.Info.Error.LocalizedMessage)"
+}
 Write-Host "SetupMode VMX option cleared." -ForegroundColor Green
 ```
 
@@ -503,15 +602,37 @@ Restart-Computer -Force
 After DC1 is fully back online, confirm PK from an elevated PowerShell session:
 
 ```powershell
+# Set $derPath to the WindowsOEMDevicesPK.der you enrolled, then verify by thumbprint.
+$derPath = "C:\Path\To\WindowsOEMDevicesPK.der"
 $pk = Get-SecureBootUEFI -Name PK
-$t  = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)])
-$s  = if ($t -match 'Windows OEM Devices') { "Valid_WindowsOEM" }
-      elseif ($t -match 'Microsoft')        { "Valid_Microsoft"  }
-      else                                  { "Valid_Other"      }
-Write-Host "PK Status: $s" -ForegroundColor $(if ($s -eq "Valid_WindowsOEM") {"Green"} else {"Red"})
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 28) {
+    Write-Host "PK Status: Invalid_NULL - enrollment did not take" -ForegroundColor Red
+} else {
+    $b = $pk.Bytes
+    $sigType = [Guid]([byte[]]$b[0..15])
+    if ($sigType -ne [Guid]"a5c059a1-94e4-4aa7-87b5-ab155c2bf072") {
+        Write-Host "PK Status: Valid_Other (not an X.509 certificate) - enrollment did not take" -ForegroundColor Red
+    } else {
+        $hdr   = [BitConverter]::ToUInt32($b, 20)
+        $size  = [BitConverter]::ToUInt32($b, 24)
+        $start = 28 + [int]$hdr + 16
+        $len   = [int]$size - 16
+        $certBytes = New-Object byte[] $len
+        [Array]::Copy($b, $start, $certBytes, 0, $len)
+        $live = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+        $der  = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($derPath)
+        Write-Host ("Live PK Thumbprint: {0}" -f $live.Thumbprint)
+        Write-Host ("DER  Thumbprint   : {0}" -f $der.Thumbprint)
+        if ($live.Thumbprint -eq $der.Thumbprint) {
+            Write-Host "PK VERIFIED: live Platform Key matches the enrolled certificate." -ForegroundColor Green
+        } else {
+            Write-Host "PK MISMATCH: live Platform Key does NOT match the DER you enrolled." -ForegroundColor Red
+        }
+    }
+}
 ```
 
-Expected: `PK Status: Valid_WindowsOEM`
+Expected: `PK VERIFIED: live Platform Key matches the enrolled certificate.`
 
 ### Step 10 - Verify DC health after all reboots
 
@@ -618,19 +739,52 @@ $vmxPath = $vmView.Config.Files.VmPathName
 $dsName  = $vmxPath -replace '^\[(.+?)\].*', '$1'
 $vmDir   = $vmxPath -replace '^\[.+?\] (.+)/[^/]+$', '$1'
 
-$ds        = Get-Datastore -Name $dsName
+# Resolve the datastore by MoRef from the VM's own attached-datastore list.
+# Get-Datastore -Name returns every datastore with that name across the
+# inventory, which picks the wrong one when duplicate datastore names exist
+# across datacenters or clusters. Match by MoRef instead, the same way the
+# script does, and fail loudly if the VMX datastore cannot be resolved.
+$ds = $null
+foreach ($dsRef in $vmView.Datastore) {
+    $candidate = Get-Datastore -Id $dsRef -ErrorAction SilentlyContinue
+    if ($candidate -and $candidate.Name -eq $dsName) {
+        $ds = $candidate
+        break
+    }
+}
+if (-not $ds) {
+    throw "Could not resolve VMX datastore '$dsName' from this VM's attached datastore list."
+}
 $dsBrowser = Get-View $ds.ExtensionData.Browser
 $spec      = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
 $spec.MatchPattern = "*.nvram"
 $results   = $dsBrowser.SearchDatastoreSubFolders("[$dsName] $vmDir", $spec)
 $nvramFile = $results.File | Where-Object { $_.Path -notmatch "_old" } | Select-Object -First 1
 
+# Safety: confirm an active .nvram file was actually found before proceeding.
+if (-not $nvramFile) {
+    throw "No active .nvram file found. The VM may already have been renamed or partially rolled back. Stop and investigate."
+}
+
+$oldBackupName = $nvramFile.Path -replace '\.nvram$', '.nvram_old'
+
+# Safety: do NOT overwrite an existing .nvram_old. If one is present, a prior
+# partial attempt likely left it, and it is the only rollback copy. Stop rather
+# than destroy it. (This mirrors the protection the bulk script performs.)
+$oldSpec = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
+$oldSpec.MatchPattern = $oldBackupName
+$oldCheck = $dsBrowser.SearchDatastoreSubFolders("[$dsName] $vmDir", $oldSpec)
+if ($oldCheck -and $oldCheck.File) {
+    throw "$oldBackupName already exists. Stop and investigate before proceeding. Do not overwrite the existing rollback copy - roll back first, or remove the file only if you intentionally no longer need it."
+}
+
 $oldPath = "[$dsName] $vmDir/$($nvramFile.Path)"
-$newPath = "[$dsName] $vmDir/$($nvramFile.Path -replace '\.nvram$', '.nvram_old')"
+$newPath = "[$dsName] $vmDir/$oldBackupName"
 
 $dcRef = (Get-Datacenter -VM $vm | Get-View).MoRef
 $fm    = Get-View (Get-View ServiceInstance).Content.FileManager
-$task  = $fm.MoveDatastoreFile_Task($oldPath, $dcRef, $newPath, $dcRef, $true)
+# Final argument $false = do NOT force-overwrite the destination.
+$task  = $fm.MoveDatastoreFile_Task($oldPath, $dcRef, $newPath, $dcRef, $false)
 
 do { Start-Sleep -Seconds 2; $t = Get-View $task } while ($t.Info.State -notin @("success","error"))
 
@@ -644,7 +798,7 @@ else { Write-Warning "NVRAM rename failed: $($t.Info.Error.LocalizedMessage)" }
 Start-VM -VM $vm
 ```
 
-Wait 2–3 minutes, then verify:
+Wait 2-3 minutes, then verify:
 
 ```powershell
 $verify = @'
@@ -668,6 +822,14 @@ $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot"
 $svcPath = "$regPath\Servicing"
 
 if (Test-Path $svcPath) {
+    Write-Host "Pre-clear Secure Boot servicing diagnostics:"
+    Write-Host "  UEFICA2023Status     : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Status' -EA SilentlyContinue))"
+    Write-Host "  UEFICA2023Error      : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023Error' -EA SilentlyContinue))"
+    Write-Host "  UEFICA2023ErrorEvent : $((Get-ItemPropertyValue -Path $svcPath -Name 'UEFICA2023ErrorEvent' -EA SilentlyContinue))"
+    Write-Host "  AvailableUpdates     : $((Get-ItemPropertyValue -Path $regPath -Name 'AvailableUpdates' -EA SilentlyContinue))"
+    # Optional stronger preservation - export the whole Secure Boot key first:
+    reg export "HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot" "$env:TEMP\SecureBoot-preclear.reg" /y
+
     Remove-Item -Path $svcPath -Recurse -Force
     Write-Host "Stale Servicing subkey cleared."
 }
@@ -675,7 +837,7 @@ if (Test-Path $svcPath) {
 Set-ItemProperty -Path $regPath -Name "AvailableUpdates" -Value 0x5944 -Type DWord -Force
 Write-Host "AvailableUpdates set: 0x$("{0:X4}" -f (Get-ItemPropertyValue -Path $regPath -Name "AvailableUpdates"))"
 
-Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+Start-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update"
 Write-Host "Task triggered - waiting 30 seconds..."
 Start-Sleep -Seconds 30
 
@@ -694,7 +856,7 @@ Restart-Computer -Force
 Log back into DC2, elevated PowerShell:
 
 ```powershell
-Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+Start-ScheduledTask -TaskPath "\Microsoft\Windows\PI\" -TaskName "Secure-Boot-Update"
 Start-Sleep -Seconds 30
 
 $val = Get-ItemPropertyValue "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot" `
@@ -732,20 +894,41 @@ Check PK status from DC2 (elevated PowerShell):
 
 ```powershell
 $pk = Get-SecureBootUEFI -Name PK
-if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 44) {
-    Write-Host "PK Status: Invalid_NULL" -ForegroundColor Red
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 28) {
+    Write-Host "PK Status: Invalid_NULL (no PK present)" -ForegroundColor Red
 } else {
-    $t = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)])
-    $s = if ($t -match 'Windows OEM Devices') { "Valid_WindowsOEM" }
-         elseif ($t -match 'Microsoft')        { "Valid_Microsoft"  }
-         else                                  { "Valid_Other"      }
-    Write-Host "PK Status: $s" -ForegroundColor $(if ($s -like "Valid_Windows*" -or $s -eq "Valid_Microsoft") {"Green"} else {"Yellow"})
+    $b = $pk.Bytes
+    $sigType = [Guid]([byte[]]$b[0..15])
+    if ($sigType -ne [Guid]"a5c059a1-94e4-4aa7-87b5-ab155c2bf072") {
+        Write-Host "PK Status: Valid_Other (populated but not an X.509 certificate - typically the ESXi placeholder)" -ForegroundColor Yellow
+    } else {
+        $hdr   = [BitConverter]::ToUInt32($b, 20)
+        $size  = [BitConverter]::ToUInt32($b, 24)
+        $start = 28 + [int]$hdr + 16
+        $len   = [int]$size - 16
+        try {
+            $certBytes = New-Object byte[] $len
+            [Array]::Copy($b, $start, $certBytes, 0, $len)
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+            Write-Host ("PK Subject   : {0}" -f $cert.Subject)
+            Write-Host ("PK Thumbprint: {0}" -f $cert.Thumbprint)
+            if ($cert.Subject -match 'CN=Windows OEM Devices PK') {
+                Write-Host "PK Status: Valid_WindowsOEM" -ForegroundColor Green
+            } elseif ($cert.Subject -match 'O=Microsoft Corporation' -or $cert.Subject -match 'CN=Microsoft') {
+                Write-Host "PK Status: Valid_Microsoft" -ForegroundColor Green
+            } else {
+                Write-Host "PK Status: Valid_Other (real certificate, not a recognized Microsoft PK)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "PK Status: Valid_Other (certificate could not be parsed)" -ForegroundColor Yellow
+        }
+    }
 }
 ```
 
 **If PK Status is `Valid_WindowsOEM` or `Valid_Microsoft`:** Skip to Step 11.
 
-**If PK Status is `Valid_Other` or `Invalid_NULL`:** Follow sub-steps 10a–10e,
+**If PK Status is `Valid_Other` or `Invalid_NULL`:** Follow sub-steps 10a-10e,
 which are identical to Phase 1 Step 9 sub-steps but for DC2. See the note at
 Phase 1 Step 9 regarding the Broadcom KB 423919 disk method as an alternative.
 
@@ -780,7 +963,19 @@ $vmConfig.ExtraConfig = @(
         Value = "SetupMode"
     }
 )
-($vm | Get-View).ReconfigVM($vmConfig)
+# Apply via ReconfigVM_Task and wait for completion (matches the script's behavior;
+# surfaces errors instead of failing silently)
+$view = $vm | Get-View
+$taskMoRef = $view.ReconfigVM_Task($vmConfig)
+$task = Get-View -Id $taskMoRef
+do {
+    Start-Sleep -Seconds 2
+    $task = Get-View -Id $taskMoRef
+} while ($task.Info.State -in @("queued","running"))
+
+if ($task.Info.State -ne "success") {
+    throw "VM reconfiguration failed: $($task.Info.Error.LocalizedMessage)"
+}
 Write-Host "SetupMode VMX option set." -ForegroundColor Green
 
 Stop-VM -VM $vm -Confirm:$false -Kill
@@ -828,7 +1023,19 @@ $vmConfig.ExtraConfig = @(
         Value = ""
     }
 )
-($vm | Get-View).ReconfigVM($vmConfig)
+# Apply via ReconfigVM_Task and wait for completion (matches the script's behavior;
+# surfaces errors instead of failing silently)
+$view = $vm | Get-View
+$taskMoRef = $view.ReconfigVM_Task($vmConfig)
+$task = Get-View -Id $taskMoRef
+do {
+    Start-Sleep -Seconds 2
+    $task = Get-View -Id $taskMoRef
+} while ($task.Info.State -in @("queued","running"))
+
+if ($task.Info.State -ne "success") {
+    throw "VM reconfiguration failed: $($task.Info.Error.LocalizedMessage)"
+}
 Write-Host "SetupMode VMX option cleared." -ForegroundColor Green
 ```
 
@@ -841,15 +1048,37 @@ Restart-Computer -Force
 #### Step 10e - Verify PK after reboot
 
 ```powershell
+# Set $derPath to the WindowsOEMDevicesPK.der you enrolled, then verify by thumbprint.
+$derPath = "C:\Path\To\WindowsOEMDevicesPK.der"
 $pk = Get-SecureBootUEFI -Name PK
-$t  = [System.Text.Encoding]::ASCII.GetString($pk.Bytes[44..($pk.Bytes.Length-1)])
-$s  = if ($t -match 'Windows OEM Devices') { "Valid_WindowsOEM" }
-      elseif ($t -match 'Microsoft')        { "Valid_Microsoft"  }
-      else                                  { "Valid_Other"      }
-Write-Host "PK Status: $s" -ForegroundColor $(if ($s -eq "Valid_WindowsOEM") {"Green"} else {"Red"})
+if ($null -eq $pk -or $null -eq $pk.Bytes -or $pk.Bytes.Length -lt 28) {
+    Write-Host "PK Status: Invalid_NULL - enrollment did not take" -ForegroundColor Red
+} else {
+    $b = $pk.Bytes
+    $sigType = [Guid]([byte[]]$b[0..15])
+    if ($sigType -ne [Guid]"a5c059a1-94e4-4aa7-87b5-ab155c2bf072") {
+        Write-Host "PK Status: Valid_Other (not an X.509 certificate) - enrollment did not take" -ForegroundColor Red
+    } else {
+        $hdr   = [BitConverter]::ToUInt32($b, 20)
+        $size  = [BitConverter]::ToUInt32($b, 24)
+        $start = 28 + [int]$hdr + 16
+        $len   = [int]$size - 16
+        $certBytes = New-Object byte[] $len
+        [Array]::Copy($b, $start, $certBytes, 0, $len)
+        $live = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+        $der  = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($derPath)
+        Write-Host ("Live PK Thumbprint: {0}" -f $live.Thumbprint)
+        Write-Host ("DER  Thumbprint   : {0}" -f $der.Thumbprint)
+        if ($live.Thumbprint -eq $der.Thumbprint) {
+            Write-Host "PK VERIFIED: live Platform Key matches the enrolled certificate." -ForegroundColor Green
+        } else {
+            Write-Host "PK MISMATCH: live Platform Key does NOT match the DER you enrolled." -ForegroundColor Red
+        }
+    }
+}
 ```
 
-Expected: `PK Status: Valid_WindowsOEM`
+Expected: `PK VERIFIED: live Platform Key matches the enrolled certificate.`
 
 ### Step 11 - Transfer PDC Emulator back to DC2
 
@@ -882,6 +1111,24 @@ Remove-Snapshot -Snapshot $snap -Confirm:$false
 ---
 
 ## Rollback Procedure
+
+> **Important: reverting a domain controller snapshot is an Active Directory
+> recovery event, not a routine VM rollback.** When a virtualized DC is reverted
+> to a snapshot, the hypervisor's VM-Generation ID change signals AD DS to invoke
+> safeguards (resetting the InvocationID and discarding the RID pool) to prevent
+> USN rollback and duplicate-SID problems. This is handled automatically on
+> modern Windows Server with a hypervisor that exposes VM-Generation ID (vSphere
+> does), but it has real consequences: the DC will re-replicate inbound, and any
+> changes that originated on that DC but had not yet replicated outbound are lost.
+> Before reverting a DC snapshot, confirm the host exposes VM-Generation ID,
+> ensure you have a recent system-state or AD-aware backup, verify replication
+> health before and after, and confirm FSMO role placement. Do not revert a DC
+> snapshot as casual cleanup. If multiple DCs are affected, never restore more
+> than one from snapshot and let them replicate against each other without
+> verifying replication health between steps. The full VM-Generation ID and
+> AD-recovery procedure is beyond the scope of this guide. Consult Microsoft's
+> "Safely virtualizing Active Directory Domain Services" guidance before
+> proceeding.
 
 If anything goes wrong on either DC at any point, revert to snapshot.
 This returns the VM to its exact pre-change state including the original NVRAM.
